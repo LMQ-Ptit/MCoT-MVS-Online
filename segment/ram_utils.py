@@ -2,6 +2,14 @@ import torch.nn.functional as F
 import torch
 from torch.nn.functional import relu, sigmoid
 from torch import Tensor
+
+# Fix backward compatibility for RAM++ with transformers >= 4.41
+import transformers.modeling_utils
+from transformers.pytorch_utils import apply_chunking_to_forward, find_pruneable_heads_and_indices, prune_linear_layer
+transformers.modeling_utils.apply_chunking_to_forward = apply_chunking_to_forward
+transformers.modeling_utils.find_pruneable_heads_and_indices = find_pruneable_heads_and_indices
+transformers.modeling_utils.prune_linear_layer = prune_linear_layer
+
 from ram.models import ram_plus
 from ram import get_transform
 
