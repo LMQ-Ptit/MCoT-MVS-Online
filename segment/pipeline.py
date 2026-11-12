@@ -106,12 +106,21 @@ class MaskGenerator:
         if self.clip_model is None:
             raise ValueError("CLIP model not attached to MaskGenerator. Pass clip_model in __init__.")
 
+        if masks is None or len(masks) == 0:
+            return torch.empty((0, 1024))
+
+        if masks.ndim == 4 and masks.shape[1] == 1:
+            masks = masks.squeeze(1)
+
         device = next(self.clip_model.parameters()).device
         cls, tokens = self.clip_model.visual_out(self.clip_model.preprocess_image(pil_image))
 
         features = []
         for i in range(masks.shape[0]):
-            seg_mask = torch.from_numpy(masks[i]).to(dtype=torch.float32, device=device)
+            m = masks[i]
+            if m.ndim == 3 and m.shape[0] == 1:
+                m = m.squeeze(0)
+            seg_mask = torch.from_numpy(m).to(dtype=torch.float32, device=device)
             image_mask = seg_mask.unsqueeze(0).unsqueeze(0)  # (1, 1, H, W)
 
             H, W = image_mask.shape[-2:]
@@ -186,6 +195,8 @@ class MaskGenerator:
         # 3. SAM 2.1
         masks_list, scores_list, _ = self.sam.get_batch_masks([boxes], [pil_img])
         masks = masks_list[0].astype(np.int16)
+        if masks.ndim == 4 and masks.shape[1] == 1:
+            masks = masks.squeeze(1)
         scores = scores_list[0]
 
         # 4. Optional CLIP Feature Pooling
