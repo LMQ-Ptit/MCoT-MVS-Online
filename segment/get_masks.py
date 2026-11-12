@@ -1,4 +1,5 @@
 import os
+os.environ["MPLBACKEND"] = "Agg"
 import json
 from typing import Optional
 from sam_utils import SAMModel

@@ -1,6 +1,6 @@
 import os
 # Ensure headless matplotlib backend to avoid display errors in notebook/server
-os.environ.setdefault("MPLBACKEND", "Agg")
+os.environ["MPLBACKEND"] = "Agg"
 
 import urllib.request
 from io import BytesIO

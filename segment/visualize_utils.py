@@ -1,3 +1,5 @@
+import os
+os.environ["MPLBACKEND"] = "Agg"
 import numpy as np
 import cv2
 import json
