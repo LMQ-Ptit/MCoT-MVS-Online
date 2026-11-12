@@ -90,74 +90,74 @@ class Clip(nn.Module):
 
         return pooled, x
 
-model = Clip()
-model.cuda().eval()
+def extract_features_cirr():
+    model = Clip()
+    model.cuda().eval()
 
-image_path_list = []
-cirr_base_path = (
-    "../data/cirr/cirr_dataset"
-)
-cirr_base_path = cirr_base_path
-with open(
-    os.path.join(cirr_base_path, "cirr/image_splits/split.rc2.test1.json"), "r"
-) as f:
-    test_split = json.load(f)
-with open(
-    os.path.join(cirr_base_path, "cirr/image_splits/split.rc2.val.json"), "r"
-) as f:
-    val_split = json.load(f)
-with open(
-    os.path.join(cirr_base_path, "cirr/image_splits/split.rc2.train.json"), "r"
-) as f:
-    train_split = json.load(f)
-res = {}
-res.update(test_split)
-res.update(val_split)
-res.update(train_split)
-for value in res.values():
-    image_path_list.append(os.path.join(cirr_base_path, value))
-seg_feature_dir = "../data/cirr/segment/seg_features_vit-h_patch"
-mask_base_path = (
-    "../data/cirr/segment/masks/"
-)
-with torch.inference_mode():
-    for img_path in tqdm(image_path_list):
-        img_name = os.path.basename(img_path).split(".")[0]
-        save_dir = os.path.join(seg_feature_dir, img_name)
-        os.makedirs(save_dir, exist_ok=True)
-        save_path = os.path.join(save_dir, "seg_feature.pt")
-        # if os.path.exists(save_path):
-        #    continue
-        img = Image.open(img_path)
-        mask_array = load_mask(os.path.join(mask_base_path, img_name, "masks.npz"))
-        
-        cls,tokens = model.visual_out(model.preprocess_image(img)) # (1,256,1024)
-        feature = []
-        for i in range(mask_array.shape[0]):
-            seg_mask = torch.from_numpy(mask_array[i]).to(dtype=torch.float32).cuda()
-            image_mask = seg_mask.unsqueeze(0).unsqueeze(0)  # (1, 1, H, W)
+    image_path_list = []
+    cirr_base_path = "../data/cirr/cirr_dataset"
+    with open(
+        os.path.join(cirr_base_path, "cirr/image_splits/split.rc2.test1.json"), "r"
+    ) as f:
+        test_split = json.load(f)
+    with open(
+        os.path.join(cirr_base_path, "cirr/image_splits/split.rc2.val.json"), "r"
+    ) as f:
+        val_split = json.load(f)
+    with open(
+        os.path.join(cirr_base_path, "cirr/image_splits/split.rc2.train.json"), "r"
+    ) as f:
+        train_split = json.load(f)
+    res = {}
+    res.update(test_split)
+    res.update(val_split)
+    res.update(train_split)
+    for value in res.values():
+        image_path_list.append(os.path.join(cirr_base_path, value))
+    seg_feature_dir = "../data/cirr/segment/seg_features_vit-h_patch"
+    mask_base_path = "../data/cirr/segment/masks/"
+    with torch.inference_mode():
+        for img_path in tqdm(image_path_list):
+            img_name = os.path.basename(img_path).split(".")[0]
+            save_dir = os.path.join(seg_feature_dir, img_name)
+            os.makedirs(save_dir, exist_ok=True)
+            save_path = os.path.join(save_dir, "seg_feature.pt")
+            img = Image.open(img_path)
+            mask_array = load_mask(os.path.join(mask_base_path, img_name, "masks.npz"))
+            
+            cls, tokens = model.visual_out(model.preprocess_image(img))  # (1,256,1024)
+            feature = []
+            for i in range(mask_array.shape[0]):
+                seg_mask = torch.from_numpy(mask_array[i]).to(dtype=torch.float32).cuda()
+                image_mask = seg_mask.unsqueeze(0).unsqueeze(0)  # (1, 1, H, W)
 
-            H, W = image_mask.shape[-2:]
-            stride_h = H // 16
-            stride_w = W // 16
+                H, W = image_mask.shape[-2:]
+                stride_h = H // 16
+                stride_w = W // 16
 
-            pooled_mask = F.max_pool2d(
-                image_mask,
-                kernel_size=(stride_h, stride_w),
-                stride=(stride_h, stride_w),
-            )
+                if stride_h > 0 and stride_w > 0:
+                    pooled_mask = F.max_pool2d(
+                        image_mask,
+                        kernel_size=(stride_h, stride_w),
+                        stride=(stride_h, stride_w),
+                    )
+                else:
+                    pooled_mask = image_mask
 
-            if pooled_mask.shape[-2:] != (16, 16):
-                pooled_mask = F.interpolate(pooled_mask, size=(16, 16), mode="nearest")
+                if pooled_mask.shape[-2:] != (16, 16):
+                    pooled_mask = F.interpolate(pooled_mask, size=(16, 16), mode="nearest")
 
-            mask_patches = pooled_mask.reshape(1,-1,1).long()
-            non_zero_num = mask_patches.sum()
-            if non_zero_num == 0:
-                continue
-            image_feature = (tokens * mask_patches).sum(
-                dim=1
-            ) / non_zero_num
-            feature.append(image_feature.squeeze())
-        assert len(feature) > 0
-        feature = torch.stack(feature)
-        torch.save(feature.cpu(), save_path)
+                mask_patches = pooled_mask.reshape(1, -1, 1).long()
+                non_zero_num = mask_patches.sum()
+                if non_zero_num == 0:
+                    continue
+                image_feature = (tokens * mask_patches).sum(dim=1) / (non_zero_num + 1e-2)
+                feature.append(image_feature.squeeze())
+            if len(feature) == 0:
+                feature = [tokens.mean(dim=1).squeeze(0)]
+            feature = torch.stack(feature)
+            torch.save(feature.cpu(), save_path)
+
+
+if __name__ == "__main__":
+    extract_features_cirr()
