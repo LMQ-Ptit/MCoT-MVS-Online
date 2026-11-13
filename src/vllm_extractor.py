@@ -222,7 +222,7 @@ class MCoTExtractor:
             raise ValueError(f"Unknown mode: {self.mode}")
 
     def _extract_via_local(self, image: Image.Image, modification_text: str) -> Dict[str, str]:
-        user_prompt = COT_USER_PROMPT_TEMPLATE.format(modification_text=modification_text)
+        user_prompt = COT_USER_PROMPT_TEMPLATE.replace("{modification_text}", modification_text)
 
         messages = [
             {"role": "system", "content": COT_SYSTEM_PROMPT},
@@ -281,7 +281,7 @@ class MCoTExtractor:
         return self._parse_json_response(response, default_caption=modification_text)
 
     def _extract_via_api(self, image: Image.Image, modification_text: str) -> Dict[str, str]:
-        user_prompt = COT_USER_PROMPT_TEMPLATE.format(modification_text=modification_text)
+        user_prompt = COT_USER_PROMPT_TEMPLATE.replace("{modification_text}", modification_text)
         b64_img = self._encode_image_to_base64(image)
 
         messages = [
