@@ -52,6 +52,7 @@ class MCoTExtractor:
         torch_dtype: Optional[torch.dtype] = None,
         api_base: Optional[str] = None,
         api_key: Optional[str] = None,
+        warmup: bool = True,
     ):
         """
         mode:
@@ -80,6 +81,8 @@ class MCoTExtractor:
 
         if self.mode == "local":
             self._init_local_model()
+            if warmup:
+                self.warmup()
         elif self.mode == "api":
             self.api_base = api_base or os.environ.get("OPENAI_BASE_URL", "http://localhost:8000/v1")
             self.api_key = api_key or os.environ.get("OPENAI_API_KEY", "EMPTY")

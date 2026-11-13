@@ -148,6 +148,27 @@ class MaskGenerator:
             features = [tokens.mean(dim=1).squeeze(0)]
         return torch.stack(features)  # (N, 1024)
 
+    def warmup(self):
+        """
+        Pre-warm GPU kernels for RAM++, Grounding DINO, SAM 2.1, and OpenCLIP
+        to eliminate initial forward-pass latency.
+        """
+        print("⏳ Pre-warming Segment Pipeline GPU kernels...")
+        try:
+            dummy_img = Image.new("RGB", (224, 224), color=(128, 128, 128))
+            with torch.inference_mode():
+                self.process_image(
+                    image_input=dummy_img,
+                    save_dir=None,
+                    is_draw=False,
+                    compute_clip_features=self.clip_model is not None,
+                )
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            print("✅ Segment Pipeline warmup completed! Ready for real-time inference.")
+        except Exception as e:
+            print(f"⚠️ Segment warmup notice: {e}")
+
     def process_image(
         self,
         image_input: Union[str, Image.Image],

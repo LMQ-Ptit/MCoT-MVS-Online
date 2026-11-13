@@ -16,6 +16,7 @@ def load_segment_pipeline(
     sam_checkpoint_dir: Optional[str] = None,
     load_clip: bool = False,
     workers: int = 1,
+    warmup: bool = True,
 ) -> MaskGenerator:
     """
     Factory function to initialize and return a complete MaskGenerator pipeline.
@@ -48,14 +49,20 @@ def load_segment_pipeline(
         from extract_seg_feature_fiq import Clip
         clip_model = Clip().to(device).eval()
 
-    print("✅ Segment Pipeline loaded successfully!")
-    return MaskGenerator(
+    pipeline = MaskGenerator(
         ram_model=ram,
         dino_model=dino,
         sam_model=sam,
         clip_model=clip_model,
         workers=workers,
     )
+
+    # 4. Optional Pre-warming
+    if warmup:
+        pipeline.warmup()
+
+    print("✅ Segment Pipeline loaded successfully!")
+    return pipeline
 
 
 def cirr():
