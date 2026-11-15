@@ -1,0 +1,8 @@
+{
+  "dress_type": "dress",
+  "num_queries": 2017,
+  "gallery_size": 3817,
+  "recall_at_10": 46.45513138324244,
+  "recall_at_50": 71.93852255825483,
+  "timestamp": "2026-11-15 05:42:14"
+}
