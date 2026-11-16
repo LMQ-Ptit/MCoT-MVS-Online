@@ -2,7 +2,7 @@
 # =============================================================
 # setup.sh - Cài đặt môi trường MCoT-MVS trên Kaggle
 # Chạy trong notebook:
-#   !wget -q -O setup.sh https://raw.githubusercontent.com/<USER>/<REPO>/main/setup.sh
+#   !wget -q -O setup.sh https://raw.githubusercontent.com/LMQ-Ptit/MCoT-MVS-Online/huytd/setup.sh
 #   !bash setup.sh
 # =============================================================
 set -e
@@ -13,6 +13,7 @@ ENV_DIR="${CONDA_DIR}/envs/py310"
 PIP="${ENV_DIR}/bin/pip"
 PY="${ENV_DIR}/bin/python"
 REPO_DIR="/kaggle/working/MCoT-MVS-Online"
+BRANCH="${BRANCH:-huytd}"   # nhánh chứa code search của bạn
 
 echo "=========================================================="
 echo "BƯỚC 1: MINICONDA & PYTHON 3.10"
@@ -36,10 +37,11 @@ echo "BƯỚC 2: CLONE / CẬP NHẬT MÃ NGUỒN"
 echo "=========================================================="
 cd /kaggle/working
 if [ ! -d "MCoT-MVS-Online" ]; then
-    git clone https://github.com/LMQ-Ptit/MCoT-MVS-Online.git
+    git clone -b ${BRANCH} https://github.com/LMQ-Ptit/MCoT-MVS-Online.git
 else
-    (cd MCoT-MVS-Online && git pull)
+    (cd MCoT-MVS-Online && git fetch origin && git checkout ${BRANCH} && git pull origin ${BRANCH})
 fi
+echo "• Đang dùng nhánh: $(cd MCoT-MVS-Online && git rev-parse --abbrev-ref HEAD)"
 
 echo "=========================================================="
 echo "BƯỚC 3: PYTORCH 2.3.1 (CUDA 12.1) & DEPENDENCIES"
