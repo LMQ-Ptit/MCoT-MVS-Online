@@ -97,19 +97,24 @@ mkdir -p "${REPO_DIR}/segment/sam2/checkpoints"
 mkdir -p "${REPO_DIR}/segment/ram_models"
 mkdir -p "${REPO_DIR}/src/checkpoints"
 
-# Hàm tìm và symlink weight, dừng nếu không thấy
-link_weight() {   # $1=glob-pattern  $2=dest
-    local src
-    src=$(find /kaggle/input -name "$1" 2>/dev/null | head -n 1)
-    [ -n "$src" ] || err "Không tìm thấy '$1' trong /kaggle/input – hãy Add Input dataset chứa trọng số."
+# Thư mục chứa toàn bộ trọng số (đã upload sẵn trên Kaggle)
+WEIGHTS_DIR="/kaggle/input/datasets/b22dckh099lngminhqu/mcot-mvs-weights/weights"
+
+# Kiểm tra thư mục weights tồn tại
+[ -d "$WEIGHTS_DIR" ] || err "Không tìm thấy thư mục weights tại '$WEIGHTS_DIR'. Hãy Add dataset 'mcot-mvs-weights' vào notebook."
+
+# Hàm symlink weight với đường dẫn tường minh
+link_weight() {   # $1=tên file trong WEIGHTS_DIR  $2=dest
+    local src="${WEIGHTS_DIR}/$1"
+    [ -f "$src" ] || err "Không tìm thấy file '$1' trong $WEIGHTS_DIR"
     ln -sf "$src" "$2"
     ok "$(basename "$2")  →  $src"
 }
 
-link_weight "sam2.1_hiera_large.pt"  "${REPO_DIR}/segment/sam2/checkpoints/sam2.1_hiera_large.pt"
-link_weight "*ram_plus_swin_large*"  "${REPO_DIR}/segment/ram_models/ram_plus_swin_large_14m.pth"
-link_weight "dress.pt"               "${REPO_DIR}/src/checkpoints/dress.pt"
-link_weight "shirt.pt"               "${REPO_DIR}/src/checkpoints/shirt.pt"
+link_weight "sam2.1_hiera_large.pt"       "${REPO_DIR}/segment/sam2/checkpoints/sam2.1_hiera_large.pt"
+link_weight "ram_plus_swin_large_14m.pth" "${REPO_DIR}/segment/ram_models/ram_plus_swin_large_14m.pth"
+link_weight "dress.pt"                    "${REPO_DIR}/src/checkpoints/dress.pt"
+link_weight "shirt.pt"                    "${REPO_DIR}/src/checkpoints/shirt.pt"
 
 # =============================================================
 step "BƯỚC 5: KIỂM TRA MÔI TRƯỜNG"
