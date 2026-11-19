@@ -15,13 +15,136 @@ Use Python version **3.10.0**:
 ```bash
 conda create -n MCoT-MVS python=3.10.0
 conda activate MCoT-MVS
-````
+```
 
 Then install the requirements:
 
 ```bash
 pip install -r requirements.txt
 ```
+
+---
+
+## ⚡ Hướng Dẫn Setup & Test Nhanh (Kaggle / Linux)
+
+### 1. Setup môi trường trên Kaggle (Chạy 1 lần trong Notebook trắng)
+> **Lưu ý trước khi chạy:** 
+> - Bật **GPU T4 x2** hoặc **P100** trong phần *Settings -> Accelerator*.
+> - Đã Add Dataset chứa weights tại: `/kaggle/input/datasets/b22dckh099lngminhqu/mcot-mvs-weights/weights`
+
+Chạy cell bash sau trên Kaggle:
+```bash
+%%bash
+wget -q -O setup.sh https://raw.githubusercontent.com/LMQ-Ptit/MCoT-MVS-Online/quylm_v2/setup.sh
+BRANCH=quylm_v2 bash setup.sh
+```
+
+---
+
+### 2. Thiết lập đường dẫn import (Chạy đầu mỗi Session Python)
+Trong notebook, thêm cell Python này trước khi import các module:
+```python
+import sys
+sys.path.insert(0, "/kaggle/working/MCoT-MVS-Online/src")
+sys.path.insert(0, "/kaggle/working/MCoT-MVS-Online/segment")
+```
+
+---
+
+### 3. Test MCoT VLLM Extractor (Qwen2.5-VL-3B-Instruct)
+Cell Python kiểm tra trích xuất đặc trưng đa phương thức (Target, Retained, Removed) từ ảnh và câu lệnh chỉnh sửa:
+```python
+import sys
+sys.path.insert(0, "/kaggle/working/MCoT-MVS-Online/src")
+sys.path.insert(0, "/kaggle/working/MCoT-MVS-Online/segment")
+
+import os
+import time
+from PIL import Image
+from vllm_extractor import MCoTExtractor
+
+# 1. Khởi tạo mô hình
+# - mode="local": Chạy trực tiếp model Qwen2.5-VL trên GPU (yêu cầu GPU VRAM >= 6GB)
+# - mode="mock": Test nhanh pipeline logic mà không cần tải model
+extractor = MCoTExtractor(
+    mode="local",
+    model_name="Qwen/Qwen2.5-VL-3B-Instruct",
+    device="cuda:0"   # Sử dụng cuda:0 (hoặc cuda:1 nếu chạy song song)
+)
+
+# 2. Warmup kernel GPU
+extractor.warmup()
+
+# 3. Chuẩn bị ảnh và câu lệnh test
+sample_img_path = "/kaggle/working/MCoT-MVS-Online/data/fiq/fashionIQ_dataset/images/B005X4PL1G.png"
+if os.path.exists(sample_img_path):
+    img = Image.open(sample_img_path).convert("RGB")
+else:
+    print("⚠ Không tìm thấy ảnh mẫu, sử dụng ảnh synthetic (test logic)...")
+    img = Image.new("RGB", (336, 336), color=(200, 70, 70))
+
+modification_text = "is shiny and blue with longer sleeves and flared skirt"
+
+# 4. Trích xuất MCoT
+t0 = time.perf_counter()
+result = extractor.extract(img, modification_text)
+elapsed = time.perf_counter() - t0
+
+print(f"\n⏱ Thời gian inference: {elapsed:.2f}s")
+print(f"📝 Câu lệnh gốc: {modification_text}\n")
+print(f"🎯 Target description : {result['target']}")
+print(f"✅ Retained attributes : {result['retained']}")
+print(f"❌ Deleted/Changed     : {result['deleted']}")
+```
+
+---
+
+### 4. Test Segment Pipeline (RAM++ + Grounding DINO + SAM 2.1)
+Cell Python kiểm tra toàn bộ pipeline tagging, detect bounding boxes và phân đoạn mặt nạ (masks):
+```python
+import sys
+sys.path.insert(0, "/kaggle/working/MCoT-MVS-Online/src")
+sys.path.insert(0, "/kaggle/working/MCoT-MVS-Online/segment")
+
+import os
+import time
+from PIL import Image
+from get_masks import load_segment_pipeline
+
+# 1. Khởi tạo Segment Pipeline
+# Tự động tải weights RAM++ và SAM 2.1 đã liên kết từ thư mục checkpoints
+segment_pipe = load_segment_pipeline(
+    device="cuda:0",
+    load_clip=False    # Đặt True nếu muốn test luôn việc pool OpenCLIP features
+)
+
+# 2. Chuẩn bị ảnh đầu vào
+sample_img_path = "/kaggle/working/MCoT-MVS-Online/data/fiq/fashionIQ_dataset/images/B005X4PL1G.png"
+if os.path.exists(sample_img_path):
+    img = Image.open(sample_img_path).convert("RGB")
+else:
+    print("⚠ Không tìm thấy ảnh mẫu, sử dụng ảnh synthetic...")
+    img = Image.new("RGB", (384, 384), color=(50, 120, 200))
+
+# 3. Chạy phân đoạn
+t0 = time.perf_counter()
+output = segment_pipe.process_image(
+    image_input=img,
+    save_dir="./test_segment_output",
+    is_draw=True,
+    compute_clip_features=False
+)
+elapsed = time.perf_counter() - t0
+
+print(f"\n⏱ Thời gian xử lý Segment: {elapsed:.2f}s")
+print(f"🏷 Tags nhận diện (RAM++)     : {output['tags']}")
+print(f"📦 Bounding boxes (DINO)       : {len(output['boxes'])} boxes")
+print(f"🎭 Masks tạo ra (SAM 2.1)      : {len(output['masks'])} masks")
+if output.get("annotated_image_path"):
+    print(f"🖼 Ảnh trực quan hóa lưu tại   : {output['annotated_image_path']}")
+```
+
+---
 
 ---
 
