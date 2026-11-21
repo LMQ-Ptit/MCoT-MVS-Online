@@ -174,7 +174,7 @@ class MCoTExtractor:
             dummy_img = Image.new("RGB", (224, 224), color=(128, 128, 128))
             self.extract(dummy_img, "is red and has short sleeves")
             if "cuda" in self.device:
-                torch.cuda.synchronize()
+                torch.cuda.synchronize(self.device)
             print("✅ Warmup completed! Ready for real-time inference.")
         except Exception as e:
             print(f"⚠️ Warmup notice: {e}")

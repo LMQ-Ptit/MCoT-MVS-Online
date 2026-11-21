@@ -55,6 +55,7 @@ sys.path.insert(0, "/kaggle/working/MCoT-MVS-Online/segment")
 
 ### 3. Test Qwen2.5-VL local trên Kaggle
 Chạy cell dưới đây lần lượt với 3B AWQ và 7B AWQ, giữ cùng `image_url` và câu lệnh chỉnh sửa. Mỗi lượt dùng một tiến trình `py310` riêng để GPU giải phóng model khi cell kết thúc. Chỉ cần đổi `model_name` để chọn checkpoint.
+Cell gọi `extractor.warmup()` trước khi đo latency và peak VRAM trên ảnh test.
 
 ```python
 %%script /kaggle/working/miniconda/envs/py310/bin/python
@@ -98,15 +99,15 @@ extractor = MCoTExtractor(
     device=device,
 )
 
-torch.cuda.synchronize(device)
+extractor.warmup()
 torch.cuda.reset_peak_memory_stats(device)
 t0 = time.perf_counter()
 result = extractor.extract(img, modification_text)
 torch.cuda.synchronize(device)
 elapsed = time.perf_counter() - t0
 
-print(f"\n⏱ Inference đầu tiên: {elapsed:.2f}s")
-print(f"Peak VRAM (PyTorch): {torch.cuda.max_memory_allocated(device) / 2**30:.2f} GiB")
+print(f"\n⏱ Inference sau warmup: {elapsed:.2f}s")
+print(f"Peak VRAM sau warmup (PyTorch): {torch.cuda.max_memory_allocated(device) / 2**30:.2f} GiB")
 print(f"📝 Câu lệnh gốc: {modification_text}\n")
 print(f"🎯 Target description : {result['target']}")
 print(f"✅ Retained attributes : {result['retained']}")
