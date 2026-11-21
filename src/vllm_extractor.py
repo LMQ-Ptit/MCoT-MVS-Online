@@ -2,10 +2,18 @@ import os
 import re
 import json
 import base64
+from importlib import import_module
+from importlib.metadata import PackageNotFoundError, version
 from io import BytesIO
 from typing import Union, Optional, Dict, Any
+from packaging.version import Version
 from PIL import Image
 import torch
+
+AWQ_PRESETS = {
+    "qwen-vl-3b-awq": "Qwen/Qwen2.5-VL-3B-Instruct-AWQ",
+    "qwen-vl-7b-awq": "Qwen/Qwen2.5-VL-7B-Instruct-AWQ",
+}
 
 COT_SYSTEM_PROMPT = (
     "You are an expert multimodal reasoning assistant for Composed Image Retrieval (CIR).\n"
@@ -62,7 +70,14 @@ class MCoTExtractor:
             - Defaults to 'cuda:1' to keep 'cuda:0' free for the Segment pipeline.
         """
         self.mode = mode.lower()
-        self.model_name = model_name
+        self.model_name = AWQ_PRESETS.get(model_name.lower(), model_name)
+        model_id = self.model_name.rstrip("/").rsplit("/", 1)[-1].lower()
+        is_awq = model_id.endswith("-awq")
+        if self.mode == "local" and is_awq and model_id.startswith("qwen2.5-") and "-vl-" not in model_id:
+            raise ValueError(
+                "Qwen2.5 AWQ checkpoints without VL are text-only. "
+                "Choose a Qwen2.5-VL AWQ checkpoint or an AWQ preset."
+            )
 
         # Validate device availability
         if "cuda" in device and not torch.cuda.is_available():
@@ -79,6 +94,8 @@ class MCoTExtractor:
         )
 
         if self.mode == "local":
+            if is_awq:
+                self._validate_local_awq()
             self._init_local_model()
         elif self.mode == "api":
             self.api_base = api_base or os.environ.get("OPENAI_BASE_URL", "http://localhost:8000/v1")
@@ -88,6 +105,21 @@ class MCoTExtractor:
             print("ℹ️ MCoTExtractor initialized in [mock] mode.")
         else:
             raise ValueError(f"Unknown mode: {mode}. Must be 'local', 'api', or 'mock'.")
+
+    def _validate_local_awq(self):
+        if not self.device.startswith("cuda") or torch.cuda.get_device_capability(self.device) < (7, 5):
+            raise RuntimeError("Local AWQ requires an NVIDIA CUDA GPU with compute capability 7.5 or higher.")
+        if self.torch_dtype != torch.float16:
+            raise ValueError("Local AWQ requires torch.float16. Omit torch_dtype to use FP16 automatically.")
+        try:
+            if Version(version("autoawq")) < Version("0.2.7"):
+                raise ImportError("AutoAWQ 0.2.7 or newer is required.")
+            import_module("awq.modules.linear.gemm")
+        except (PackageNotFoundError, ImportError, OSError) as exc:
+            raise RuntimeError(
+                "Local AWQ requires a working AutoAWQ 0.2.7 installation. "
+                "Run setup.sh on Kaggle or setup_awq.py with the py310 interpreter."
+            ) from exc
 
     def _init_local_model(self):
         print(f"⏳ Loading local VLLM model: [{self.model_name}] on [{self.device}]...")

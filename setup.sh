@@ -87,6 +87,13 @@ $PIP install -q -r "${REPO_DIR}/requirements.txt"
 info "Cài recognize-anything (RAM++) từ GitHub..."
 $PIP install -q git+https://github.com/xinyu1205/recognize-anything.git
 
+if "$PY" -c 'import torch; raise SystemExit(not (torch.cuda.is_available() and torch.cuda.get_device_capability() >= (7, 5)))'; then
+    info "Cài và kiểm tra AutoAWQ 0.2.7 bằng môi trường py310..."
+    "$PY" "${REPO_DIR}/setup_awq.py"
+else
+    info "Bỏ qua AutoAWQ: GPU mặc định cần CUDA compute capability >= 7.5 (T4 trở lên)."
+fi
+
 info "Cài pyngrok vào Python mặc định notebook..."
 pip install -q pyngrok
 

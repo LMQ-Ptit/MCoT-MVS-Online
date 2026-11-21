@@ -29,7 +29,7 @@ pip install -r requirements.txt
 
 ### 1. Setup môi trường trên Kaggle (Chạy 1 lần trong Notebook trắng)
 > **Lưu ý trước khi chạy:** 
-> - Bật **GPU T4 x2** hoặc **P100** trong phần *Settings -> Accelerator*.
+> - Bật Internet và chọn **GPU T4 x2** trong *Settings* để dùng Qwen2.5-VL AWQ. **P100** chạy được bản 3B thường và setup sẽ tự bỏ qua bước cài AWQ.
 > - Đã Add Dataset chứa weights tại: `/kaggle/input/datasets/b22dckh099lngminhqu/mcot-mvs-weights/weights`
 
 Chạy cell bash sau trên Kaggle:
@@ -38,6 +38,8 @@ Chạy cell bash sau trên Kaggle:
 wget -q -O setup.sh https://raw.githubusercontent.com/LMQ-Ptit/MCoT-MVS-Online/quylm_v2/setup.sh
 BRANCH=quylm_v2 bash setup.sh
 ```
+
+Trên T4, `setup.sh` tự cài AutoAWQ 0.2.7 từ source và kiểm tra phép nhân AWQ trên CUDA. Bước này giữ các phiên bản đã cài trong `py310`, gồm PyTorch 2.3.1 (CUDA 12.1), torchvision 0.18.1, Transformers 4.49.0 và accelerate 1.4.0. Triton 2.3 dùng đường tính AWQ bằng PyTorch, vì vậy nên đo latency thực tế cho từng checkpoint.
 
 ---
 
@@ -51,46 +53,60 @@ sys.path.insert(0, "/kaggle/working/MCoT-MVS-Online/segment")
 
 ---
 
-### 3. Test MCoT VLLM Extractor (Qwen2.5-VL-3B-Instruct)
-Cell Python kiểm tra trích xuất đặc trưng đa phương thức (Target, Retained, Removed) từ ảnh và câu lệnh chỉnh sửa:
-```python
-import sys
-sys.path.insert(0, "/kaggle/working/MCoT-MVS-Online/src")
-sys.path.insert(0, "/kaggle/working/MCoT-MVS-Online/segment")
+### 3. Test Qwen2.5-VL local trên Kaggle
+Chạy cell dưới đây lần lượt với 3B AWQ và 7B AWQ, giữ cùng `image_url` và câu lệnh chỉnh sửa. Mỗi lượt dùng một tiến trình `py310` riêng để GPU giải phóng model khi cell kết thúc. Chỉ cần đổi `model_name` để chọn checkpoint.
 
-import os
+```python
+%%script /kaggle/working/miniconda/envs/py310/bin/python
+import sys
 import time
+from io import BytesIO
+from urllib.request import urlopen
+
+import torch
 from PIL import Image
+
+sys.path.insert(0, "/kaggle/working/MCoT-MVS-Online/src")
 from vllm_extractor import MCoTExtractor
 
-# 1. Khởi tạo mô hình
-# - mode="local": Chạy trực tiếp model Qwen2.5-VL trên GPU (yêu cầu GPU VRAM >= 6GB)
-# - mode="mock": Test nhanh pipeline logic mà không cần tải model
-extractor = MCoTExtractor(
-    mode="local",
-    model_name="Qwen/Qwen2.5-VL-3B-Instruct",
-    device="cuda:0"   # Sử dụng cuda:0 (hoặc cuda:1 nếu chạy song song)
-)
-
-# 2. Warmup kernel GPU
-extractor.warmup()
-
-# 3. Chuẩn bị ảnh và câu lệnh test
-sample_img_path = "/kaggle/working/MCoT-MVS-Online/data/fiq/fashionIQ_dataset/images/B005X4PL1G.png"
-if os.path.exists(sample_img_path):
-    img = Image.open(sample_img_path).convert("RGB")
-else:
-    print("⚠ Không tìm thấy ảnh mẫu, sử dụng ảnh synthetic (test logic)...")
-    img = Image.new("RGB", (336, 336), color=(200, 70, 70))
-
+model_name = "Qwen/Qwen2.5-VL-3B-Instruct-AWQ"  # hoặc "qwen-vl-3b-awq"
+# model_name = "Qwen/Qwen2.5-VL-7B-Instruct-AWQ"  # hoặc "qwen-vl-7b-awq"
+# model_name = "Qwen/Qwen2.5-VL-3B-Instruct"
+image_url = "https://raw.githubusercontent.com/open-mmlab/mmdetection/master/demo/demo.jpg"
 modification_text = "is shiny and blue with longer sleeves and flared skirt"
 
-# 4. Trích xuất MCoT
+with urlopen(image_url, timeout=30) as response:
+    with Image.open(BytesIO(response.read())) as source_image:
+        img = source_image.convert("RGB")
+img.thumbnail((512, 512), Image.Resampling.LANCZOS)
+print(f"Kích thước ảnh test: {img.width}×{img.height}")
+
+if not torch.cuda.is_available():
+    raise RuntimeError("Bật GPU trong Kaggle trước khi chạy cell này.")
+
+free_by_gpu = {}
+for index in range(torch.cuda.device_count()):
+    free, total = torch.cuda.mem_get_info(index)
+    free_by_gpu[index] = free
+    print(f"cuda:{index} ({torch.cuda.get_device_name(index)}): {free / 2**30:.2f}/{total / 2**30:.2f} GiB trống")
+gpu_index = max(free_by_gpu, key=free_by_gpu.get)
+device = f"cuda:{gpu_index}"
+print(f"Đang dùng {device} cho {model_name}")
+extractor = MCoTExtractor(
+    mode="local",
+    model_name=model_name,
+    device=device,
+)
+
+torch.cuda.synchronize(device)
+torch.cuda.reset_peak_memory_stats(device)
 t0 = time.perf_counter()
 result = extractor.extract(img, modification_text)
+torch.cuda.synchronize(device)
 elapsed = time.perf_counter() - t0
 
-print(f"\n⏱ Thời gian inference: {elapsed:.2f}s")
+print(f"\n⏱ Inference đầu tiên: {elapsed:.2f}s")
+print(f"Peak VRAM (PyTorch): {torch.cuda.max_memory_allocated(device) / 2**30:.2f} GiB")
 print(f"📝 Câu lệnh gốc: {modification_text}\n")
 print(f"🎯 Target description : {result['target']}")
 print(f"✅ Retained attributes : {result['retained']}")
