@@ -29,13 +29,23 @@ case "${1:-}" in
             "torchaudio==2.7.0+cu126" "transformers==4.53.3"
         "$PYTHON" -m pip check
         ;;
-    serve)
+    serve|serve-pipeline)
         if [[ ! -x "${ENV_DIR}/bin/vllm" ]]; then
             echo "Run bash kaggle_vllm.sh install first." >&2
             exit 1
         fi
 
-        export CUDA_VISIBLE_DEVICES="${MCOT_VLLM_GPU:-0}"
+        gpu=0
+        memory_utilization=0.85
+        max_sequences=8
+        extra_args=()
+        if [[ "$1" == "serve-pipeline" ]]; then
+            gpu=1
+            memory_utilization=0.60
+            max_sequences=1
+            extra_args=(--enforce-eager)
+        fi
+        export CUDA_VISIBLE_DEVICES="${MCOT_VLLM_GPU:-$gpu}"
         export VLLM_USE_V1=0
         export VLLM_ATTENTION_BACKEND=XFORMERS
         "$PYTHON" -c '
@@ -47,13 +57,14 @@ print(f"vLLM GPU: {torch.cuda.get_device_name(0)} | CUDA runtime: {torch.version
 
         exec "${ENV_DIR}/bin/vllm" serve "$MODEL" \
             --host 127.0.0.1 --port 8001 --dtype half \
-            --max-model-len 2048 --max-num-seqs 8 --gpu-memory-utilization 0.85 \
+            --max-model-len 2048 --max-num-seqs "$max_sequences" \
+            --gpu-memory-utilization "${MCOT_VLLM_GPU_MEMORY_UTILIZATION:-$memory_utilization}" \
             --limit-mm-per-prompt '{"image":1,"video":0}' \
             --mm-processor-kwargs '{"max_pixels":262144}' \
-            --disable-mm-preprocessor-cache
+            --disable-mm-preprocessor-cache "${extra_args[@]}"
         ;;
     *)
-        echo "Usage: bash kaggle_vllm.sh {install|serve}" >&2
+        echo "Usage: bash kaggle_vllm.sh {install|serve|serve-pipeline}" >&2
         exit 2
         ;;
 esac

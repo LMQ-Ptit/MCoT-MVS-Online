@@ -147,7 +147,7 @@ Sau bước 1, cài vLLM vào môi trường `mcot-vllm` riêng. Server dùng vL
 bash /kaggle/working/MCoT-MVS-Online/kaggle_vllm.sh install
 ```
 
-Chạy cell Python sau để khởi động Qwen2.5-VL-3B FP16 trên GPU 0. Server lắng nghe ở `127.0.0.1:8001` trong notebook. Lần đầu khởi động cần tải checkpoint.
+Chạy cell Python sau để khởi động Qwen2.5-VL-3B FP16. Dùng `serve` để benchmark riêng trên GPU 0, hoặc `serve-pipeline` để chạy chung với FastAPI ở mục 5. Server lắng nghe ở `127.0.0.1:8001`. Lần đầu khởi động cần tải checkpoint.
 
 ```python
 import json
@@ -180,11 +180,11 @@ with socket.socket() as connection:
         raise RuntimeError("Cổng 8001 đang được sử dụng. Dừng server cũ trước khi chạy lại.")
 
 model_id = "Qwen/Qwen2.5-VL-3B-Instruct"
+vllm_action = "serve"  # Đổi thành "serve-pipeline" khi chạy toàn bộ backend ở mục 5
 log_path = Path("/kaggle/working/mcot-vllm.log")
 with log_path.open("w", encoding="utf-8") as log:
     vllm_process = subprocess.Popen(
-        ["bash", "/kaggle/working/MCoT-MVS-Online/kaggle_vllm.sh", "serve"],
-        env={**os.environ, "MCOT_VLLM_GPU": "0"},
+        ["bash", "/kaggle/working/MCoT-MVS-Online/kaggle_vllm.sh", vllm_action],
         stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
     )
 
@@ -217,7 +217,132 @@ Giữ cùng ảnh và prompt. Số đo API bao gồm mã hóa ảnh và HTTP loc
 
 ---
 
-### 5. Test Segment Pipeline (RAM++ + Grounding DINO + SAM 2.1)
+### 5. Chạy toàn bộ backend tìm kiếm trên Kaggle
+
+**Chuẩn bị.** Bật Internet và chọn **GPU T4 x2**. Thêm dataset trọng số ở mục 1 và dataset gallery `mcot-vectors` chứa `gallery_dress_vectors.pt`. Cell test bên dưới dùng một ảnh từ dataset `fashion-iq-images`. Bạn có thể tải ảnh của mình vào Kaggle và đổi `image_path`. Tạo hai Kaggle Secrets `API_KEY` và `JWT_SECRET` với giá trị riêng.
+
+**Bước 1. Cài đặt và chạy vLLM.** Chạy cell setup mục 1, rồi cell cài vLLM mục 4. Nếu vLLM đang chạy ở cấu hình benchmark, gọi `stop_vllm(vllm_process)`. Sau đó chạy cell khởi động vLLM ở mục 4 với `vllm_action = "serve-pipeline"` và đợi báo sẵn sàng.
+
+Cấu hình pipeline đặt segmentation trên **GPU 0**, còn **GPU 1** chạy vLLM và `CIRModel`. vLLM dùng ngân sách **60% VRAM**, một sequence và eager mode để chừa bộ nhớ cho CIR. Nếu thiếu VRAM khi chạy chung, kiểm tra GPU còn tiến trình cũ bằng `nvidia-smi` và đọc hai log startup. Có thể chỉnh `MCOT_VLLM_GPU_MEMORY_UTILIZATION` trước khi khởi động vLLM. Latency của cấu hình chạy chung có thể khác bài đo vLLM riêng ở mục 3.
+
+**Bước 2. Khởi động FastAPI.** Chạy cell Python này trong kernel notebook mặc định. Uvicorn sẽ được khởi động bằng Python `py310`.
+
+```python
+import os
+import socket
+import subprocess
+import time
+from pathlib import Path
+from urllib.error import URLError
+from urllib.request import urlopen
+
+from kaggle_secrets import UserSecretsClient
+
+repo = Path("/kaggle/working/MCoT-MVS-Online")
+search_python = "/kaggle/working/miniconda/envs/py310/bin/python"
+search_base = "http://127.0.0.1:8000"
+log_path = Path("/kaggle/working/mcot-search.log")
+
+with socket.socket() as connection:
+    if connection.connect_ex(("127.0.0.1", 8000)) == 0:
+        raise RuntimeError("Dừng server đang dùng cổng 8000 trước khi chạy lại.")
+
+secrets_client = UserSecretsClient()
+search_api_key = secrets_client.get_secret("API_KEY")
+env = {
+    **os.environ,
+    "PYTHONPATH": "",
+    "MCOT_SEARCH_API_KEY": search_api_key,
+    "MCOT_SEARCH_JWT_SECRET": secrets_client.get_secret("JWT_SECRET"),
+    "MCOT_EXTRACTOR_MODE": "api",
+    "MCOT_VLLM_BASE_URL": "http://127.0.0.1:8001/v1",
+    "MCOT_GALLERY_PATH": "/kaggle/input/datasets/thichuy/mcot-vectors/gallery_dress_vectors.pt",
+}
+with log_path.open("w", encoding="utf-8") as log:
+    search_process = subprocess.Popen(
+        [search_python, "-m", "uvicorn", "search_api:app",
+         "--app-dir", str(repo / "src"), "--host", "127.0.0.1", "--port", "8000"],
+        cwd=repo, env=env, stdout=log, stderr=subprocess.STDOUT,
+    )
+
+try:
+    deadline = time.monotonic() + 900
+    while time.monotonic() < deadline:
+        if search_process.poll() is not None:
+            raise RuntimeError(f"FastAPI đã dừng với mã {search_process.returncode}.")
+        try:
+            with urlopen(f"{search_base}/openapi.json", timeout=2):
+                break
+        except (URLError, TimeoutError):
+            time.sleep(2)
+    else:
+        raise TimeoutError("FastAPI chưa sẵn sàng sau 15 phút.")
+except BaseException:
+    if search_process.poll() is None:
+        search_process.terminate()
+        search_process.wait(timeout=30)
+    print("\n".join(log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-30:]))
+    raise
+
+print(f"FastAPI đã sẵn sàng tại {search_base}")
+```
+
+`MCOT_CIR_CHECKPOINT` có thể trỏ đến checkpoint `dress.pt` riêng. Mặc định backend dùng checkpoint mà `setup.sh` đã liên kết tại `src/checkpoints/dress.pt`.
+
+**Bước 3. Lấy JWT, warmup rồi gọi tìm kiếm.** Cell chạy một request đầy đủ để warmup và đo ba request tiếp theo. Header `Server-Timing` ghi thời gian bước Qwen và tổng xử lý bên trong endpoint, tính bằng mili giây.
+
+```python
+from statistics import median
+from time import perf_counter
+
+import requests
+
+token_response = requests.post(
+    f"{search_base}/api/token", headers={"X-API-KEY": search_api_key}, timeout=30,
+)
+token_response.raise_for_status()
+authorization = {"Authorization": f"Bearer {token_response.json()['access_token']}"}
+image_path = "/kaggle/input/datasets/thichuy/fashion-iq-images/9822490682.png"
+
+def search_once():
+    with open(image_path, "rb") as image_file:
+        response = requests.post(
+            f"{search_base}/api/list",
+            headers=authorization,
+            files={"image": image_file},
+            data={"text": "make it black", "top_k": 5},
+            timeout=120,
+        )
+    response.raise_for_status()
+    return response
+
+search_once()  # Warmup toàn bộ pipeline
+latencies = []
+for _ in range(3):
+    started = perf_counter()
+    result = search_once()
+    latencies.append(perf_counter() - started)
+    print(f"{latencies[-1]:.2f}s | {result.headers.get('Server-Timing', '')}")
+print(f"Latency trung vị /api/list: {median(latencies):.2f}s")
+print(result.json())
+```
+
+**So với local.** Dừng FastAPI bằng `search_process.terminate()` rồi `search_process.wait(timeout=30)`. Dừng vLLM bằng `stop_vllm(vllm_process)` để giải phóng GPU 1. Chạy lại bước 2 với `MCOT_EXTRACTOR_MODE = "local"`, rồi chạy bước 3 với cùng ảnh, prompt và gallery.
+
+**Gọi từ bên ngoài Kaggle.** Tạo Kaggle Secret `NGROK_AUTHTOKEN`, chạy cell sau rồi dùng `public_base` thay cho `search_base` ở client. Client vẫn lấy JWT và gọi `/api/list` theo bước 3. Cổng **8001** phục vụ kết nối nội bộ giữa FastAPI và vLLM.
+
+```python
+from pyngrok import ngrok
+
+ngrok.set_auth_token(secrets_client.get_secret("NGROK_AUTHTOKEN"))
+tunnel = ngrok.connect(8000)
+public_base = tunnel.public_url
+print(public_base)
+```
+
+---
+
+### 6. Test Segment Pipeline (RAM++ + Grounding DINO + SAM 2.1)
 Cell Python kiểm tra toàn bộ pipeline tagging, detect bounding boxes và phân đoạn mặt nạ (masks):
 ```python
 import sys
