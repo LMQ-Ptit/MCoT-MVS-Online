@@ -29,7 +29,7 @@ pip install -r requirements.txt
 
 ### 1. Setup môi trường trên Kaggle (Chạy 1 lần trong Notebook trắng)
 > **Lưu ý trước khi chạy:** 
-> - Bật Internet và chọn **GPU T4 x2** trong *Settings* để dùng Qwen2.5-VL AWQ. **P100** chạy được bản 3B thường và setup sẽ tự bỏ qua bước cài AWQ.
+> - Bật Internet và chọn **GPU T4 x2** trong *Settings* để thử Qwen2.5-VL NF4. Cell test chọn một GPU theo VRAM còn trống.
 > - Đã Add Dataset chứa weights tại: `/kaggle/input/datasets/b22dckh099lngminhqu/mcot-mvs-weights/weights`
 
 Chạy cell bash sau trên Kaggle:
@@ -39,7 +39,7 @@ wget -q -O setup.sh https://raw.githubusercontent.com/LMQ-Ptit/MCoT-MVS-Online/q
 BRANCH=quylm_v2 bash setup.sh
 ```
 
-Trên T4, `setup.sh` tự cài AutoAWQ 0.2.7 từ source và kiểm tra phép nhân AWQ trên CUDA. Bước này giữ các phiên bản đã cài trong `py310`, gồm PyTorch 2.3.1 (CUDA 12.1), torchvision 0.18.1, Transformers 4.49.0 và accelerate 1.4.0. Triton 2.3 dùng đường tính AWQ bằng PyTorch, vì vậy nên đo latency thực tế cho từng checkpoint.
+`setup.sh` cài `bitsandbytes==0.45.5` trong môi trường `py310` và giữ các phiên bản PyTorch 2.3.1 (CUDA 12.1), torchvision 0.18.1, Transformers 4.49.0 và accelerate 1.4.0.
 
 ---
 
@@ -53,9 +53,13 @@ sys.path.insert(0, "/kaggle/working/MCoT-MVS-Online/segment")
 
 ---
 
-### 3. Test Qwen2.5-VL local trên Kaggle
-Chạy cell dưới đây lần lượt với 3B AWQ và 7B AWQ, giữ cùng `image_url` và câu lệnh chỉnh sửa. Mỗi lượt dùng một tiến trình `py310` riêng để GPU giải phóng model khi cell kết thúc. Chỉ cần đổi `model_name` để chọn checkpoint.
-Cell gọi `extractor.warmup()` trước khi đo latency và peak VRAM trên ảnh test.
+### 3. Test Qwen2.5-VL FP16 và NF4 trên Kaggle
+
+Chạy cell dưới đây với cùng `image_url` và câu lệnh chỉnh sửa. Chỉ cần đổi `model_name` giữa `qwen-vl-3b-4bit`, `qwen-vl-7b-4bit` và checkpoint gốc 3B FP16 để so sánh.
+
+Hai preset 4-bit tải checkpoint gốc từ Hugging Face rồi lượng tử hóa bằng bitsandbytes NF4 khi nạp, với phần xử lý ảnh và lớp đầu ra giữ FP16. Có thể truyền ID checkpoint gốc cùng `load_in_4bit=True` vào `MCoTExtractor` để có cùng cấu hình. Lần đầu cần tải đầy đủ trọng số gốc.
+
+Mỗi lượt dùng một tiến trình `py310` riêng để giải phóng model khi cell kết thúc. Cell gọi `extractor.warmup()` trước khi đo latency và peak VRAM trên ảnh test.
 
 ```python
 %%script /kaggle/working/miniconda/envs/py310/bin/python
@@ -70,9 +74,9 @@ from PIL import Image
 sys.path.insert(0, "/kaggle/working/MCoT-MVS-Online/src")
 from vllm_extractor import MCoTExtractor
 
-model_name = "Qwen/Qwen2.5-VL-3B-Instruct-AWQ"  # hoặc "qwen-vl-3b-awq"
-# model_name = "Qwen/Qwen2.5-VL-7B-Instruct-AWQ"  # hoặc "qwen-vl-7b-awq"
-# model_name = "Qwen/Qwen2.5-VL-3B-Instruct"
+model_name = "qwen-vl-3b-4bit"
+# model_name = "qwen-vl-7b-4bit"
+# model_name = "Qwen/Qwen2.5-VL-3B-Instruct"  # Mốc FP16
 image_url = "https://raw.githubusercontent.com/open-mmlab/mmdetection/master/demo/demo.jpg"
 modification_text = "is shiny and blue with longer sleeves and flared skirt"
 

@@ -2,17 +2,15 @@ import os
 import re
 import json
 import base64
-from importlib import import_module
-from importlib.metadata import PackageNotFoundError, version
+from importlib.metadata import PackageNotFoundError
 from io import BytesIO
 from typing import Union, Optional, Dict, Any
-from packaging.version import Version
 from PIL import Image
 import torch
 
-AWQ_PRESETS = {
-    "qwen-vl-3b-awq": "Qwen/Qwen2.5-VL-3B-Instruct-AWQ",
-    "qwen-vl-7b-awq": "Qwen/Qwen2.5-VL-7B-Instruct-AWQ",
+FOUR_BIT_PRESETS = {
+    "qwen-vl-3b-4bit": "Qwen/Qwen2.5-VL-3B-Instruct",
+    "qwen-vl-7b-4bit": "Qwen/Qwen2.5-VL-7B-Instruct",
 }
 
 COT_SYSTEM_PROMPT = (
@@ -60,6 +58,7 @@ class MCoTExtractor:
         torch_dtype: Optional[torch.dtype] = None,
         api_base: Optional[str] = None,
         api_key: Optional[str] = None,
+        load_in_4bit: bool = False,
     ):
         """
         mode:
@@ -68,16 +67,16 @@ class MCoTExtractor:
             - 'mock': For pipeline debugging / testing without loading weights
         device:
             - Defaults to 'cuda:1' to keep 'cuda:0' free for the Segment pipeline.
+        load_in_4bit:
+            - Quantizes the original checkpoint to bitsandbytes NF4 in local mode.
+            - Enabled automatically by 'qwen-vl-3b-4bit' and 'qwen-vl-7b-4bit'.
         """
         self.mode = mode.lower()
-        self.model_name = AWQ_PRESETS.get(model_name.lower(), model_name)
-        model_id = self.model_name.rstrip("/").rsplit("/", 1)[-1].lower()
-        is_awq = model_id.endswith("-awq")
-        if self.mode == "local" and is_awq and model_id.startswith("qwen2.5-") and "-vl-" not in model_id:
-            raise ValueError(
-                "Qwen2.5 AWQ checkpoints without VL are text-only. "
-                "Choose a Qwen2.5-VL AWQ checkpoint or an AWQ preset."
-            )
+        preset_checkpoint = FOUR_BIT_PRESETS.get(model_name.lower())
+        self.model_name = preset_checkpoint or model_name
+        self.load_in_4bit = load_in_4bit or preset_checkpoint is not None
+        if self.load_in_4bit and self.mode != "local":
+            raise ValueError('4-bit loading requires mode="local".')
 
         # Validate device availability
         if "cuda" in device and not torch.cuda.is_available():
@@ -94,8 +93,6 @@ class MCoTExtractor:
         )
 
         if self.mode == "local":
-            if is_awq:
-                self._validate_local_awq()
             self._init_local_model()
         elif self.mode == "api":
             self.api_base = api_base or os.environ.get("OPENAI_BASE_URL", "http://localhost:8000/v1")
@@ -106,25 +103,28 @@ class MCoTExtractor:
         else:
             raise ValueError(f"Unknown mode: {mode}. Must be 'local', 'api', or 'mock'.")
 
-    def _validate_local_awq(self):
-        if not self.device.startswith("cuda") or torch.cuda.get_device_capability(self.device) < (7, 5):
-            raise RuntimeError("Local AWQ requires an NVIDIA CUDA GPU with compute capability 7.5 or higher.")
-        if self.torch_dtype != torch.float16:
-            raise ValueError("Local AWQ requires torch.float16. Omit torch_dtype to use FP16 automatically.")
-        try:
-            if Version(version("autoawq")) < Version("0.2.7"):
-                raise ImportError("AutoAWQ 0.2.7 or newer is required.")
-            import_module("awq.modules.linear.gemm")
-        except (PackageNotFoundError, ImportError, OSError) as exc:
-            raise RuntimeError(
-                "Local AWQ requires a working AutoAWQ 0.2.7 installation. "
-                "Run setup.sh on Kaggle or setup_awq.py with the py310 interpreter."
-            ) from exc
-
     def _init_local_model(self):
-        print(f"⏳ Loading local VLLM model: [{self.model_name}] on [{self.device}]...")
         from transformers import AutoProcessor
 
+        load_options = {}
+        if self.load_in_4bit:
+            if not self.device.startswith("cuda"):
+                raise RuntimeError("Local bitsandbytes NF4 requires a CUDA GPU in this project.")
+            from transformers import BitsAndBytesConfig
+
+            try:
+                load_options["quantization_config"] = BitsAndBytesConfig(
+                    load_in_4bit=True,
+                    bnb_4bit_quant_type="nf4",
+                    bnb_4bit_compute_dtype=torch.float16,
+                    # In Transformers 4.49, this skip list also applies to 4-bit loading.
+                    llm_int8_skip_modules=["visual", "lm_head"],
+                )
+            except PackageNotFoundError as exc:
+                raise RuntimeError("Install bitsandbytes==0.45.5 in this environment or run setup.sh.") from exc
+
+        precision = "bitsandbytes NF4" if self.load_in_4bit else self.torch_dtype
+        print(f"⏳ Loading local VLLM model: [{self.model_name}] on [{self.device}] ({precision})...")
         self.processor = AutoProcessor.from_pretrained(
             self.model_name,
             trust_remote_code=True,
@@ -147,6 +147,7 @@ class MCoTExtractor:
             torch_dtype=self.torch_dtype,
             device_map={"": self.device},
             trust_remote_code=True,
+            **load_options,
         ).eval()
 
         if "cuda" in self.device:
@@ -364,6 +365,7 @@ if __name__ == "__main__":
     parser.add_argument("--mode", type=str, default="mock", choices=["local", "api", "mock"])
     parser.add_argument("--model_name", type=str, default="Qwen/Qwen2.5-VL-3B-Instruct")
     parser.add_argument("--device", type=str, default="cuda:1")
+    parser.add_argument("--load-in-4bit", action="store_true", help="Load the original checkpoint as bitsandbytes NF4")
     parser.add_argument(
         "--image_path",
         type=str,
@@ -381,6 +383,7 @@ if __name__ == "__main__":
         mode=args.mode,
         model_name=args.model_name,
         device=args.device,
+        load_in_4bit=args.load_in_4bit,
     )
 
     if os.path.exists(args.image_path):
@@ -389,6 +392,7 @@ if __name__ == "__main__":
         print(f"⚠️ Image not found at {args.image_path}, testing with synthetic image:")
         img_input = Image.new("RGB", (224, 224), color=(200, 100, 50))
 
+    extractor.warmup()
     result = extractor.extract(img_input, args.text)
     print("\n🎉 Extracted MCoT Output:")
     print(json.dumps(result, indent=2, ensure_ascii=False))
