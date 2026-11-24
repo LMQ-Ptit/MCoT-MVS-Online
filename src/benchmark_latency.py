@@ -1,7 +1,23 @@
-"""Wall-clock timing for the Kaggle inference examples."""
+"""Image input and wall-clock timing for the Kaggle inference examples."""
 
+from io import BytesIO
 from statistics import median
 from time import perf_counter
+from urllib.request import urlopen
+
+from PIL import Image, ImageOps
+
+
+DEFAULT_TEST_IMAGE_URL = "https://collectionapi.metmuseum.org/api/collection/v1/iiif/159159/331375/main-image"
+
+
+def load_test_image(image_url=DEFAULT_TEST_IMAGE_URL):
+    """Download a test image and return it as RGB with a maximum side of 512 px."""
+    with urlopen(image_url, timeout=30) as response:
+        with Image.open(BytesIO(response.read())) as source:
+            img = ImageOps.exif_transpose(source).convert("RGB")
+    img.thumbnail((512, 512), Image.Resampling.LANCZOS)
+    return img
 
 
 def measure_inference(infer, *, repeats=3, synchronize=None):

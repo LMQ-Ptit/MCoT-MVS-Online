@@ -27,9 +27,9 @@ pip install -r requirements.txt
 
 ## Hướng dẫn chạy trên Kaggle
 
-Mặc định, hai bước Qwen và backend dùng **Qwen/Qwen2.5-VL-3B-Instruct FP16**. Các bài đo chạy tuần tự, dùng cùng ảnh mẫu và in latency trung vị của ba lượt sau warmup.
+Mặc định, hai bước Qwen và backend dùng **Qwen/Qwen2.5-VL-3B-Instruct FP16**. Mỗi cell benchmark tự tải cùng ảnh váy dạ hội xanh, chỉnh hướng ảnh theo EXIF, chuyển sang RGB và thu về tối đa 512 px mỗi chiều trước khi warmup và đo. Để thử ảnh khác, đổi `load_test_image()` thành `load_test_image("https://...")` trong cell đang chạy. Dùng cùng URL nếu muốn so sánh latency giữa các bước. [Ảnh Public Domain của The Met](https://www.metmuseum.org/art/collection/search/159159)
 
-### 1. Setup môi trường và chuẩn bị ảnh test
+### 1. Setup môi trường
 
 Bật Internet và chọn **GPU T4 x2**. Thêm dataset trọng số `mcot-mvs-weights` để có thư mục `/kaggle/input/datasets/b22dckh099lngminhqu/mcot-mvs-weights/weights`.
 
@@ -42,25 +42,6 @@ time env BRANCH=quylm_v2 bash setup.sh
 
 Dòng `time` ở bước này đo thời gian setup. Các cell inference bên dưới sử dụng môi trường `py310` với PyTorch 2.3.1 (CUDA 12.1), torchvision 0.18.1, Transformers 4.49.0 và accelerate 1.4.0.
 
-Cell tải ảnh váy dạ hội xanh từ The Met, thu về tối đa 512 px mỗi chiều và lưu thành `/kaggle/working/mcot-test.png`. Cả bốn bài đo dùng chung file này và prompt `make it black` khi có bước Qwen. Đổi `image_url` nếu muốn thử ảnh online khác. [Ảnh Public Domain của The Met](https://www.metmuseum.org/art/collection/search/159159)
-
-```python
-from io import BytesIO
-from pathlib import Path
-from urllib.request import urlopen
-
-from PIL import Image
-
-image_url = "https://collectionapi.metmuseum.org/api/collection/v1/iiif/159159/331375/main-image"
-test_image = Path("/kaggle/working/mcot-test.png")
-with urlopen(image_url, timeout=30) as response:
-    with Image.open(BytesIO(response.read())) as source:
-        img = source.convert("RGB")
-img.thumbnail((512, 512), Image.Resampling.LANCZOS)
-img.save(test_image)
-print(f"Ảnh test: {test_image} ({img.width}×{img.height})")
-```
-
 ### 2. Qwen local qua Transformers
 
 Cell dùng `MCoTExtractor(mode="local")` trên GPU 0. Model được giải phóng khi cell kết thúc. Có thể đổi `model_name` thành `qwen-vl-3b-4bit` hoặc `qwen-vl-7b-4bit` để thử NF4 riêng. Giữ checkpoint FP16 mặc định khi so với vLLM ở mục 3.
@@ -70,16 +51,14 @@ Cell dùng `MCoTExtractor(mode="local")` trên GPU 0. Model được giải phó
 import sys
 
 import torch
-from PIL import Image
 
 sys.path.insert(0, "/kaggle/working/MCoT-MVS-Online/src")
-from benchmark_latency import measure_inference
+from benchmark_latency import load_test_image, measure_inference
 from vllm_extractor import MCoTExtractor
 
 device = "cuda:0"
 model_name = "Qwen/Qwen2.5-VL-3B-Instruct"
-with Image.open("/kaggle/working/mcot-test.png") as source:
-    img = source.convert("RGB")
+img = load_test_image()
 text = "make it black"
 
 extractor = MCoTExtractor(mode="local", model_name=model_name, device=device)
@@ -177,10 +156,8 @@ Gửi một request ảnh để warmup, rồi đo ba request qua API. Số đo b
 %%script /kaggle/working/miniconda/envs/py310/bin/python
 import sys
 
-from PIL import Image
-
 sys.path.insert(0, "/kaggle/working/MCoT-MVS-Online/src")
-from benchmark_latency import measure_inference
+from benchmark_latency import load_test_image, measure_inference
 from vllm_extractor import MCoTExtractor
 
 extractor = MCoTExtractor(
@@ -190,8 +167,7 @@ extractor = MCoTExtractor(
     api_base="http://127.0.0.1:8001/v1",
     api_key="EMPTY",
 )
-with Image.open("/kaggle/working/mcot-test.png") as source:
-    img = source.convert("RGB")
+img = load_test_image()
 text = "make it black"
 
 extractor.extract(img, text)
@@ -207,23 +183,21 @@ stop_vllm(vllm_process)
 
 ### 4. Segment
 
-Đo RAM++, Grounding DINO, SAM 2.1 và pooling OpenCLIP trên GPU 0. Cell chạy một lượt warmup và đồng bộ GPU khi đo. Ảnh test đã được chuẩn bị ở mục 1.
+Đo RAM++, Grounding DINO, SAM 2.1 và pooling OpenCLIP trên GPU 0. Cell tự tải ảnh test, chạy một lượt warmup và đồng bộ GPU khi đo.
 
 ```python
 %%script /kaggle/working/miniconda/envs/py310/bin/python
 import sys
 
 import torch
-from PIL import Image
 
 sys.path.insert(0, "/kaggle/working/MCoT-MVS-Online/src")
 sys.path.insert(0, "/kaggle/working/MCoT-MVS-Online/segment")
-from benchmark_latency import measure_inference
+from benchmark_latency import load_test_image, measure_inference
 from get_masks import load_segment_pipeline
 
 device = "cuda:0"
-with Image.open("/kaggle/working/mcot-test.png") as source:
-    img = source.convert("RGB")
+img = load_test_image()
 
 with torch.cuda.device(device):
     segment = load_segment_pipeline(device=device, load_clip=True)
@@ -242,7 +216,7 @@ print(f"Segment features: {tuple(result['seg_features'].shape)}")
 
 ### 5. Backend và host toàn bộ pipeline
 
-**Chuẩn bị.** Thêm dataset gallery `mcot-vectors` chứa `gallery_dress_vectors.pt` và tạo hai Kaggle Secrets `API_KEY`, `JWT_SECRET`. Dùng lại ảnh test đã chuẩn bị ở mục 1.
+**Chuẩn bị.** Thêm dataset gallery `mcot-vectors` chứa `gallery_dress_vectors.pt` và tạo hai Kaggle Secrets `API_KEY`, `JWT_SECRET`.
 
 **Bước 1. Khởi động lại vLLM cho toàn pipeline.** Trong kernel mặc định, gọi lại hàm từ mục 3 sau khi đã dừng server benchmark.
 
@@ -320,28 +294,31 @@ print(f"FastAPI đã sẵn sàng tại {search_base}")
 
 ```python
 import sys
+from io import BytesIO
 
 import requests
 
 sys.path.insert(0, str(repo / "src"))
-from benchmark_latency import measure_inference
+from benchmark_latency import load_test_image, measure_inference
 
 token_response = requests.post(
     f"{search_base}/api/token", headers={"X-API-KEY": search_api_key}, timeout=30,
 )
 token_response.raise_for_status()
 authorization = {"Authorization": f"Bearer {token_response.json()['access_token']}"}
-image_path = "/kaggle/working/mcot-test.png"
+img = load_test_image()
+with BytesIO() as image_buffer:
+    img.save(image_buffer, format="PNG")
+    image_bytes = image_buffer.getvalue()
 
 def search_once():
-    with open(image_path, "rb") as image_file:
-        response = requests.post(
-            f"{search_base}/api/list",
-            headers=authorization,
-            files={"image": image_file},
-            data={"text": "make it black", "top_k": 5},
-            timeout=120,
-        )
+    response = requests.post(
+        f"{search_base}/api/list",
+        headers=authorization,
+        files={"image": ("query.png", image_bytes, "image/png")},
+        data={"text": "make it black", "top_k": 5},
+        timeout=120,
+    )
     response.raise_for_status()
     return response
 
