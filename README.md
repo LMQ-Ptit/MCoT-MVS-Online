@@ -31,7 +31,7 @@ Mặc định, hai bước Qwen và backend dùng **Qwen/Qwen2.5-VL-3B-Instruct 
 
 ### 1. Setup môi trường và chuẩn bị ảnh test
 
-Bật Internet và chọn **GPU T4 x2**. Thêm dataset trọng số `mcot-mvs-weights` để có thư mục `/kaggle/input/datasets/b22dckh099lngminhqu/mcot-mvs-weights/weights`. Để dùng ảnh mặc định, thêm dataset `fashion-iq-images`. Nếu dùng ảnh riêng, tải ảnh lên Kaggle và đổi `source_path` ở cell chuẩn bị ảnh.
+Bật Internet và chọn **GPU T4 x2**. Thêm dataset trọng số `mcot-mvs-weights` để có thư mục `/kaggle/input/datasets/b22dckh099lngminhqu/mcot-mvs-weights/weights`.
 
 ```bash
 %%bash
@@ -42,20 +42,20 @@ time env BRANCH=quylm_v2 bash setup.sh
 
 Dòng `time` ở bước này đo thời gian setup. Các cell inference bên dưới sử dụng môi trường `py310` với PyTorch 2.3.1 (CUDA 12.1), torchvision 0.18.1, Transformers 4.49.0 và accelerate 1.4.0.
 
-Chuẩn bị một ảnh RGB tối đa 512 px mỗi chiều. Cả bốn bài đo dùng file đã tạo và prompt `make it black` khi có bước Qwen.
+Cell tải ảnh váy dạ hội xanh từ The Met, thu về tối đa 512 px mỗi chiều và lưu thành `/kaggle/working/mcot-test.png`. Cả bốn bài đo dùng chung file này và prompt `make it black` khi có bước Qwen. Đổi `image_url` nếu muốn thử ảnh online khác. [Ảnh Public Domain của The Met](https://www.metmuseum.org/art/collection/search/159159)
 
 ```python
+from io import BytesIO
 from pathlib import Path
+from urllib.request import urlopen
 
 from PIL import Image
 
-source_path = Path("/kaggle/input/datasets/thichuy/fashion-iq-images/9822490682.png")
-if not source_path.is_file():
-    raise FileNotFoundError(f"Đổi source_path thành đường dẫn ảnh test trên Kaggle: {source_path}")
-
+image_url = "https://collectionapi.metmuseum.org/api/collection/v1/iiif/159159/331375/main-image"
 test_image = Path("/kaggle/working/mcot-test.png")
-with Image.open(source_path) as source:
-    img = source.convert("RGB")
+with urlopen(image_url, timeout=30) as response:
+    with Image.open(BytesIO(response.read())) as source:
+        img = source.convert("RGB")
 img.thumbnail((512, 512), Image.Resampling.LANCZOS)
 img.save(test_image)
 print(f"Ảnh test: {test_image} ({img.width}×{img.height})")
