@@ -25,129 +25,86 @@ pip install -r requirements.txt
 
 ---
 
-## ⚡ Hướng Dẫn Setup & Test Nhanh (Kaggle / Linux)
+## Hướng dẫn chạy trên Kaggle
 
-### 1. Setup môi trường trên Kaggle (Chạy 1 lần trong Notebook trắng)
-> **Lưu ý trước khi chạy:** 
-> - Bật Internet và chọn **GPU T4 x2** trong *Settings* để thử Qwen2.5-VL NF4. Cell test chọn một GPU theo VRAM còn trống.
-> - Đã Add Dataset chứa weights tại: `/kaggle/input/datasets/b22dckh099lngminhqu/mcot-mvs-weights/weights`
+Mặc định, hai bước Qwen và backend dùng **Qwen/Qwen2.5-VL-3B-Instruct FP16**. Các bài đo chạy tuần tự, dùng cùng ảnh mẫu và in latency trung vị của ba lượt sau warmup.
 
-Chạy cell bash sau trên Kaggle:
+### 1. Setup môi trường và chuẩn bị ảnh test
+
+Bật Internet và chọn **GPU T4 x2**. Thêm dataset trọng số `mcot-mvs-weights` để có thư mục `/kaggle/input/datasets/b22dckh099lngminhqu/mcot-mvs-weights/weights`. Để dùng ảnh mặc định, thêm dataset `fashion-iq-images`. Nếu dùng ảnh riêng, tải ảnh lên Kaggle và đổi `source_path` ở cell chuẩn bị ảnh.
+
 ```bash
 %%bash
+set -e
 wget -q -O setup.sh https://raw.githubusercontent.com/LMQ-Ptit/MCoT-MVS-Online/quylm_v2/setup.sh
-BRANCH=quylm_v2 bash setup.sh
+time env BRANCH=quylm_v2 bash setup.sh
 ```
 
-`setup.sh` cài `bitsandbytes==0.45.5` trong môi trường `py310` và giữ các phiên bản PyTorch 2.3.1 (CUDA 12.1), torchvision 0.18.1, Transformers 4.49.0 và accelerate 1.4.0.
+Dòng `time` ở bước này đo thời gian setup. Các cell inference bên dưới sử dụng môi trường `py310` với PyTorch 2.3.1 (CUDA 12.1), torchvision 0.18.1, Transformers 4.49.0 và accelerate 1.4.0.
 
----
+Chuẩn bị một ảnh RGB tối đa 512 px mỗi chiều. Cả bốn bài đo dùng file đã tạo và prompt `make it black` khi có bước Qwen.
 
-### 2. Thiết lập đường dẫn import (Chạy đầu mỗi Session Python)
-Trong notebook, thêm cell Python này trước khi import các module:
 ```python
-import sys
-sys.path.insert(0, "/kaggle/working/MCoT-MVS-Online/src")
-sys.path.insert(0, "/kaggle/working/MCoT-MVS-Online/segment")
+from pathlib import Path
+
+from PIL import Image
+
+source_path = Path("/kaggle/input/datasets/thichuy/fashion-iq-images/9822490682.png")
+if not source_path.is_file():
+    raise FileNotFoundError(f"Đổi source_path thành đường dẫn ảnh test trên Kaggle: {source_path}")
+
+test_image = Path("/kaggle/working/mcot-test.png")
+with Image.open(source_path) as source:
+    img = source.convert("RGB")
+img.thumbnail((512, 512), Image.Resampling.LANCZOS)
+img.save(test_image)
+print(f"Ảnh test: {test_image} ({img.width}×{img.height})")
 ```
 
----
+### 2. Qwen local qua Transformers
 
-### 3. Test Qwen2.5-VL FP16 và NF4 trên Kaggle
-
-Chạy cell dưới đây với cùng `image_url` và câu lệnh chỉnh sửa. Chỉ cần đổi `model_name` giữa `qwen-vl-3b-4bit`, `qwen-vl-7b-4bit` và checkpoint gốc 3B FP16 để so sánh.
-
-Hai preset 4-bit tải checkpoint gốc từ Hugging Face rồi lượng tử hóa bằng bitsandbytes NF4 khi nạp, với phần xử lý ảnh và lớp đầu ra giữ FP16. Có thể truyền ID checkpoint gốc cùng `load_in_4bit=True` vào `MCoTExtractor` để có cùng cấu hình. Lần đầu cần tải đầy đủ trọng số gốc.
-
-Mỗi lượt dùng một tiến trình `py310` riêng để giải phóng model local khi cell kết thúc. Cell gọi `extractor.warmup()` cho model local và chạy thử ảnh test trước khi đo.
+Cell dùng `MCoTExtractor(mode="local")` trên GPU 0. Model được giải phóng khi cell kết thúc. Có thể đổi `model_name` thành `qwen-vl-3b-4bit` hoặc `qwen-vl-7b-4bit` để thử NF4 riêng. Giữ checkpoint FP16 mặc định khi so với vLLM ở mục 3.
 
 ```python
 %%script /kaggle/working/miniconda/envs/py310/bin/python
 import sys
-import time
-from io import BytesIO
-from statistics import median
-from urllib.request import urlopen
 
 import torch
 from PIL import Image
 
 sys.path.insert(0, "/kaggle/working/MCoT-MVS-Online/src")
+from benchmark_latency import measure_inference
 from vllm_extractor import MCoTExtractor
 
-mode = "local"  # Dùng "api" với server vLLM ở mục 4
-model_name = "qwen-vl-3b-4bit"
-# model_name = "qwen-vl-7b-4bit"
-# model_name = "Qwen/Qwen2.5-VL-3B-Instruct"  # Mốc FP16 và tên model trên vLLM
-gpu_index = None  # Đặt 0 để so sánh FP16 trên cùng T4 mặc định của vLLM
-repetitions = 3
-image_url = "https://raw.githubusercontent.com/open-mmlab/mmdetection/master/demo/demo.jpg"
-modification_text = "is shiny and blue with longer sleeves and flared skirt"
+device = "cuda:0"
+model_name = "Qwen/Qwen2.5-VL-3B-Instruct"
+with Image.open("/kaggle/working/mcot-test.png") as source:
+    img = source.convert("RGB")
+text = "make it black"
 
-with urlopen(image_url, timeout=30) as response:
-    with Image.open(BytesIO(response.read())) as source_image:
-        img = source_image.convert("RGB")
-img.thumbnail((512, 512), Image.Resampling.LANCZOS)
-print(f"Kích thước ảnh test: {img.width}×{img.height}")
-
-if mode == "local":
-    if not torch.cuda.is_available():
-        raise RuntimeError("Bật GPU trong Kaggle trước khi chạy cell này.")
-    free_by_gpu = {}
-    for index in range(torch.cuda.device_count()):
-        free, total = torch.cuda.mem_get_info(index)
-        free_by_gpu[index] = free
-        print(f"cuda:{index} ({torch.cuda.get_device_name(index)}): {free / 2**30:.2f}/{total / 2**30:.2f} GiB trống")
-    if gpu_index is None:
-        gpu_index = max(free_by_gpu, key=free_by_gpu.get)
-    device = f"cuda:{gpu_index}"
-    extractor = MCoTExtractor(mode=mode, model_name=model_name, device=device)
-    extractor.warmup()
-elif mode == "api":
-    extractor = MCoTExtractor(
-        mode=mode, model_name=model_name, device="cpu",
-        api_base="http://127.0.0.1:8001/v1", api_key="EMPTY",
-    )
-else:
-    raise ValueError("Chọn mode='local' hoặc mode='api'.")
-
-# Warm up with the benchmark's image and prompt in either mode.
-extractor.extract(img, modification_text)
-if mode == "local":
-    torch.cuda.synchronize(device)
-    torch.cuda.reset_peak_memory_stats(device)
-
-latencies = []
-for _ in range(repetitions):
-    t0 = time.perf_counter()
-    result = extractor.extract(img, modification_text)
-    if mode == "local":
-        torch.cuda.synchronize(device)
-    latencies.append(time.perf_counter() - t0)
-
-print(f"\n{mode} / {model_name}")
-print("Inference sau warmup: " + ", ".join(f"{t:.2f}s" for t in latencies))
-print(f"Latency trung vị: {median(latencies):.2f}s")
-if mode == "local":
-    print(f"Peak VRAM sau warmup (PyTorch): {torch.cuda.max_memory_allocated(device) / 2**30:.2f} GiB")
-print(f"📝 Câu lệnh gốc: {modification_text}\n")
-print(f"🎯 Target description : {result['target']}")
-print(f"✅ Retained attributes : {result['retained']}")
-print(f"❌ Deleted/Changed     : {result['deleted']}")
+extractor = MCoTExtractor(mode="local", model_name=model_name, device=device)
+extractor.warmup()
+extractor.extract(img, text)
+torch.cuda.synchronize(device)
+torch.cuda.reset_peak_memory_stats(device)
+result = measure_inference(
+    lambda: extractor.extract(img, text),
+    synchronize=lambda: torch.cuda.synchronize(device),
+)
+print(f"Peak VRAM (PyTorch): {torch.cuda.max_memory_allocated(device) / 2**30:.2f} GiB")
+print(result)
 ```
 
----
+### 3. Qwen qua API vLLM
 
-### 4. Chạy Qwen2.5-VL qua vLLM trên Kaggle
-
-Sau bước 1, cài vLLM vào môi trường `mcot-vllm` riêng. Server dùng vLLM 0.9.2, CUDA runtime 12.6 và backend xFormers trên T4. Client và các cell Transformers vẫn dùng `py310`. [Wheel CUDA 12.6](https://github.com/vllm-project/vllm/releases/tag/v0.9.2)
+Cài vLLM vào môi trường riêng `mcot-vllm`. Launcher dùng vLLM 0.9.2, CUDA runtime 12.6 và xFormers trên T4. Client vẫn chạy trong `py310`. [Wheel CUDA 12.6](https://github.com/vllm-project/vllm/releases/tag/v0.9.2)
 
 ```bash
 %%bash
 bash /kaggle/working/MCoT-MVS-Online/kaggle_vllm.sh install
 ```
 
-Chạy cell Python sau để khởi động Qwen2.5-VL-3B FP16. Dùng `serve` để benchmark riêng trên GPU 0, hoặc `serve-pipeline` để chạy chung với FastAPI ở mục 5. Server lắng nghe ở `127.0.0.1:8001`. Lần đầu khởi động cần tải checkpoint.
+Chạy cell sau bằng kernel Python mặc định để khởi động 3B FP16 trên GPU 0 và đợi API `127.0.0.1:8001` sẵn sàng. Sau khi khai báo, hàm `start_vllm()` cũng được dùng ở mục 5.
 
 ```python
 import json
@@ -161,67 +118,137 @@ from urllib.error import URLError
 from urllib.request import urlopen
 
 def stop_vllm(process):
-    if process.poll() is None:
+    if process.poll() is not None:
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        process.wait(timeout=30)
+    except subprocess.TimeoutExpired:
         try:
-            os.killpg(process.pid, signal.SIGTERM)
+            os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
-        try:
-            process.wait(timeout=30)
-        except subprocess.TimeoutExpired:
+        process.wait()
+
+
+def start_vllm(action="serve"):
+    with socket.socket() as connection:
+        if connection.connect_ex(("127.0.0.1", 8001)) == 0:
+            raise RuntimeError("Dừng server đang dùng cổng 8001 trước khi chạy lại.")
+
+    model_id = "Qwen/Qwen2.5-VL-3B-Instruct"
+    log_path = Path("/kaggle/working/mcot-vllm.log")
+    with log_path.open("w", encoding="utf-8") as log:
+        process = subprocess.Popen(
+            ["bash", "/kaggle/working/MCoT-MVS-Online/kaggle_vllm.sh", action],
+            stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
+        )
+
+    try:
+        deadline = time.monotonic() + 900
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                raise RuntimeError(f"vLLM đã dừng với mã {process.returncode}.")
             try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
+                with urlopen("http://127.0.0.1:8001/v1/models", timeout=2) as response:
+                    models = json.load(response)["data"]
+                if any(model["id"] == model_id for model in models):
+                    print("vLLM đã sẵn sàng tại http://127.0.0.1:8001/v1")
+                    return process
+            except (URLError, TimeoutError):
                 pass
-            process.wait()
-
-with socket.socket() as connection:
-    if connection.connect_ex(("127.0.0.1", 8001)) == 0:
-        raise RuntimeError("Cổng 8001 đang được sử dụng. Dừng server cũ trước khi chạy lại.")
-
-model_id = "Qwen/Qwen2.5-VL-3B-Instruct"
-vllm_action = "serve"  # Đổi thành "serve-pipeline" khi chạy toàn bộ backend ở mục 5
-log_path = Path("/kaggle/working/mcot-vllm.log")
-with log_path.open("w", encoding="utf-8") as log:
-    vllm_process = subprocess.Popen(
-        ["bash", "/kaggle/working/MCoT-MVS-Online/kaggle_vllm.sh", vllm_action],
-        stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
-    )
-
-try:
-    deadline = time.monotonic() + 900
-    while time.monotonic() < deadline:
-        if vllm_process.poll() is not None:
-            raise RuntimeError(f"vLLM đã dừng với mã {vllm_process.returncode}.")
-        try:
-            with urlopen("http://127.0.0.1:8001/v1/models", timeout=2) as response:
-                served_models = json.load(response)["data"]
-            if any(model["id"] == model_id for model in served_models):
-                break
-        except (URLError, TimeoutError):
-            pass
-        time.sleep(2)
-    else:
+            time.sleep(2)
         raise TimeoutError("Server vLLM chưa sẵn sàng sau 15 phút.")
-except BaseException:
-    stop_vllm(vllm_process)
-    print("\n".join(log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-30:]))
-    raise
+    except BaseException:
+        stop_vllm(process)
+        print("\n".join(log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-30:]))
+        raise
 
-print("vLLM đã sẵn sàng tại http://127.0.0.1:8001/v1")
+
+vllm_process = start_vllm()
 ```
 
-Để đo vLLM, chạy lại cell mục 3 với `mode = "api"` và `model_name = "Qwen/Qwen2.5-VL-3B-Instruct"`. Cell gửi một request ảnh để warmup rồi đo ba request tuần tự. Sau khi đo, dừng server bằng `stop_vllm(vllm_process)`. Tiếp theo chạy cell mục 3 với `mode = "local"`, cùng `model_name` và `gpu_index = 0` để lấy mốc Transformers FP16 trên cùng GPU.
+Gửi một request ảnh để warmup, rồi đo ba request qua API. Số đo bao gồm mã hóa ảnh và HTTP localhost. Hai engine có thể sinh số token khác nhau, vì vậy đây là phép so latency tổng trên cùng đầu vào.
 
-Giữ cùng ảnh và prompt. Số đo API bao gồm mã hóa ảnh và HTTP localhost. Số token đầu ra có thể khác nhau giữa hai engine và ảnh hưởng tổng latency. Bài đo này kiểm tra latency từng request. Để đánh giá lợi ích batching của vLLM, cần đo throughput với nhiều request đồng thời.
+```python
+%%script /kaggle/working/miniconda/envs/py310/bin/python
+import sys
 
----
+from PIL import Image
 
-### 5. Chạy toàn bộ backend tìm kiếm trên Kaggle
+sys.path.insert(0, "/kaggle/working/MCoT-MVS-Online/src")
+from benchmark_latency import measure_inference
+from vllm_extractor import MCoTExtractor
 
-**Chuẩn bị.** Bật Internet và chọn **GPU T4 x2**. Thêm dataset trọng số ở mục 1 và dataset gallery `mcot-vectors` chứa `gallery_dress_vectors.pt`. Cell test bên dưới dùng một ảnh từ dataset `fashion-iq-images`. Bạn có thể tải ảnh của mình vào Kaggle và đổi `image_path`. Tạo hai Kaggle Secrets `API_KEY` và `JWT_SECRET` với giá trị riêng.
+extractor = MCoTExtractor(
+    mode="api",
+    model_name="Qwen/Qwen2.5-VL-3B-Instruct",
+    device="cpu",
+    api_base="http://127.0.0.1:8001/v1",
+    api_key="EMPTY",
+)
+with Image.open("/kaggle/working/mcot-test.png") as source:
+    img = source.convert("RGB")
+text = "make it black"
 
-**Bước 1. Cài đặt và chạy vLLM.** Chạy cell setup mục 1, rồi cell cài vLLM mục 4. Nếu vLLM đang chạy ở cấu hình benchmark, gọi `stop_vllm(vllm_process)`. Sau đó chạy cell khởi động vLLM ở mục 4 với `vllm_action = "serve-pipeline"` và đợi báo sẵn sàng.
+extractor.extract(img, text)
+result = measure_inference(lambda: extractor.extract(img, text))
+print(result)
+```
+
+Dừng vLLM benchmark trong kernel notebook mặc định trước khi sang mục 4.
+
+```python
+stop_vllm(vllm_process)
+```
+
+### 4. Segment
+
+Đo RAM++, Grounding DINO, SAM 2.1 và pooling OpenCLIP trên GPU 0. Cell chạy một lượt warmup và đồng bộ GPU khi đo. Ảnh test đã được chuẩn bị ở mục 1.
+
+```python
+%%script /kaggle/working/miniconda/envs/py310/bin/python
+import sys
+
+import torch
+from PIL import Image
+
+sys.path.insert(0, "/kaggle/working/MCoT-MVS-Online/src")
+sys.path.insert(0, "/kaggle/working/MCoT-MVS-Online/segment")
+from benchmark_latency import measure_inference
+from get_masks import load_segment_pipeline
+
+device = "cuda:0"
+with Image.open("/kaggle/working/mcot-test.png") as source:
+    img = source.convert("RGB")
+
+with torch.cuda.device(device):
+    segment = load_segment_pipeline(device=device, load_clip=True)
+
+    @torch.inference_mode()
+    def infer_segment():
+        return segment.process_image(img, is_draw=False, compute_clip_features=True)
+
+    infer_segment()
+    result = measure_inference(infer_segment, synchronize=lambda: torch.cuda.synchronize(device))
+
+print(f"Tags: {result['tags']}")
+print(f"Boxes: {len(result['boxes'])} | Masks: {len(result['masks'])}")
+print(f"Segment features: {tuple(result['seg_features'].shape)}")
+```
+
+### 5. Backend và host toàn bộ pipeline
+
+**Chuẩn bị.** Thêm dataset gallery `mcot-vectors` chứa `gallery_dress_vectors.pt` và tạo hai Kaggle Secrets `API_KEY`, `JWT_SECRET`. Dùng lại ảnh test đã chuẩn bị ở mục 1.
+
+**Bước 1. Khởi động lại vLLM cho toàn pipeline.** Trong kernel mặc định, gọi lại hàm từ mục 3 sau khi đã dừng server benchmark.
+
+```python
+vllm_process = start_vllm("serve-pipeline")
+```
 
 Cấu hình pipeline đặt segmentation trên **GPU 0**, còn **GPU 1** chạy vLLM và `CIRModel`. vLLM dùng ngân sách **60% VRAM**, một sequence và eager mode để chừa bộ nhớ cho CIR. Nếu thiếu VRAM khi chạy chung, kiểm tra GPU còn tiến trình cũ bằng `nvidia-smi` và đọc hai log startup. Có thể chỉnh `MCOT_VLLM_GPU_MEMORY_UTILIZATION` trước khi khởi động vLLM. Latency của cấu hình chạy chung có thể khác bài đo vLLM riêng ở mục 3.
 
@@ -292,17 +319,19 @@ print(f"FastAPI đã sẵn sàng tại {search_base}")
 **Bước 3. Lấy JWT, warmup rồi gọi tìm kiếm.** Cell chạy một request đầy đủ để warmup và đo ba request tiếp theo. Header `Server-Timing` ghi thời gian bước Qwen và tổng xử lý bên trong endpoint, tính bằng mili giây.
 
 ```python
-from statistics import median
-from time import perf_counter
+import sys
 
 import requests
+
+sys.path.insert(0, str(repo / "src"))
+from benchmark_latency import measure_inference
 
 token_response = requests.post(
     f"{search_base}/api/token", headers={"X-API-KEY": search_api_key}, timeout=30,
 )
 token_response.raise_for_status()
 authorization = {"Authorization": f"Bearer {token_response.json()['access_token']}"}
-image_path = "/kaggle/input/datasets/thichuy/fashion-iq-images/9822490682.png"
+image_path = "/kaggle/working/mcot-test.png"
 
 def search_once():
     with open(image_path, "rb") as image_file:
@@ -317,13 +346,16 @@ def search_once():
     return response
 
 search_once()  # Warmup toàn bộ pipeline
-latencies = []
-for _ in range(3):
-    started = perf_counter()
-    result = search_once()
-    latencies.append(perf_counter() - started)
-    print(f"{latencies[-1]:.2f}s | {result.headers.get('Server-Timing', '')}")
-print(f"Latency trung vị /api/list: {median(latencies):.2f}s")
+server_timings = []
+
+def infer_search():
+    response = search_once()
+    server_timings.append(response.headers.get("Server-Timing", ""))
+    return response
+
+result = measure_inference(infer_search)
+for index, timing in enumerate(server_timings, start=1):
+    print(f"Request {index} | {timing}")
 print(result.json())
 ```
 
@@ -339,55 +371,6 @@ tunnel = ngrok.connect(8000)
 public_base = tunnel.public_url
 print(public_base)
 ```
-
----
-
-### 6. Test Segment Pipeline (RAM++ + Grounding DINO + SAM 2.1)
-Cell Python kiểm tra toàn bộ pipeline tagging, detect bounding boxes và phân đoạn mặt nạ (masks):
-```python
-import sys
-sys.path.insert(0, "/kaggle/working/MCoT-MVS-Online/src")
-sys.path.insert(0, "/kaggle/working/MCoT-MVS-Online/segment")
-
-import os
-import time
-from PIL import Image
-from get_masks import load_segment_pipeline
-
-# 1. Khởi tạo Segment Pipeline
-# Tự động tải weights RAM++ và SAM 2.1 đã liên kết từ thư mục checkpoints
-segment_pipe = load_segment_pipeline(
-    device="cuda:0",
-    load_clip=False    # Đặt True nếu muốn test luôn việc pool OpenCLIP features
-)
-
-# 2. Chuẩn bị ảnh đầu vào
-sample_img_path = "/kaggle/working/MCoT-MVS-Online/data/fiq/fashionIQ_dataset/images/B005X4PL1G.png"
-if os.path.exists(sample_img_path):
-    img = Image.open(sample_img_path).convert("RGB")
-else:
-    print("⚠ Không tìm thấy ảnh mẫu, sử dụng ảnh synthetic...")
-    img = Image.new("RGB", (384, 384), color=(50, 120, 200))
-
-# 3. Chạy phân đoạn
-t0 = time.perf_counter()
-output = segment_pipe.process_image(
-    image_input=img,
-    save_dir="./test_segment_output",
-    is_draw=True,
-    compute_clip_features=False
-)
-elapsed = time.perf_counter() - t0
-
-print(f"\n⏱ Thời gian xử lý Segment: {elapsed:.2f}s")
-print(f"🏷 Tags nhận diện (RAM++)     : {output['tags']}")
-print(f"📦 Bounding boxes (DINO)       : {len(output['boxes'])} boxes")
-print(f"🎭 Masks tạo ra (SAM 2.1)      : {len(output['masks'])} masks")
-if output.get("annotated_image_path"):
-    print(f"🖼 Ảnh trực quan hóa lưu tại   : {output['annotated_image_path']}")
-```
-
----
 
 ---
 
