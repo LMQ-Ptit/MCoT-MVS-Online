@@ -175,15 +175,9 @@ result = measure_inference(lambda: extractor.extract(img, text))
 print(result)
 ```
 
-Dừng vLLM benchmark trong kernel notebook mặc định trước khi sang mục 4.
-
-```python
-stop_vllm(vllm_process)
-```
-
 ### 4. Segment
 
-Đo RAM++, Grounding DINO, SAM 2.1 và pooling OpenCLIP trên GPU 0. Cell tự tải ảnh test, chạy một lượt warmup và đồng bộ GPU khi đo.
+Đo RAM++, Grounding DINO, SAM 2.1 và pooling OpenCLIP trên **GPU 1**. vLLM benchmark ở mục 3 có thể tiếp tục chạy trên **GPU 0**. Cell tự tải ảnh test, chạy một lượt warmup và đồng bộ GPU 1 khi đo.
 
 ```python
 %%script /kaggle/working/miniconda/envs/py310/bin/python
@@ -196,7 +190,7 @@ sys.path.insert(0, "/kaggle/working/MCoT-MVS-Online/segment")
 from benchmark_latency import load_test_image, measure_inference
 from get_masks import load_segment_pipeline
 
-device = "cuda:0"
+device = "cuda:1"
 img = load_test_image()
 
 with torch.cuda.device(device):
@@ -218,9 +212,10 @@ print(f"Segment features: {tuple(result['seg_features'].shape)}")
 
 **Chuẩn bị.** Thêm dataset gallery `mcot-vectors` chứa `gallery_dress_vectors.pt` và tạo hai Kaggle Secrets `API_KEY`, `JWT_SECRET`.
 
-**Bước 1. Khởi động lại vLLM cho toàn pipeline.** Trong kernel mặc định, gọi lại hàm từ mục 3 sau khi đã dừng server benchmark.
+**Bước 1. Khởi động lại vLLM cho toàn pipeline.** Trong kernel mặc định, dừng vLLM benchmark trên GPU 0 rồi khởi động lại theo cấu hình dùng chung với FastAPI.
 
 ```python
+stop_vllm(vllm_process)
 vllm_process = start_vllm("serve-pipeline")
 ```
 
