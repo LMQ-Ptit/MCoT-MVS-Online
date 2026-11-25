@@ -83,7 +83,7 @@ Cài vLLM vào môi trường riêng `mcot-vllm`. Launcher dùng vLLM 0.9.2, CUD
 bash /kaggle/working/MCoT-MVS-Online/kaggle_vllm.sh install
 ```
 
-Chạy cell sau bằng kernel Python mặc định để khởi động 3B FP16 trên GPU 0 và đợi API `127.0.0.1:8001` sẵn sàng. Sau khi khai báo, hàm `start_vllm()` cũng được dùng ở mục 5.
+Chạy cell sau bằng kernel Python mặc định để khai báo hai hàm quản lý vLLM. Hai hàm này cũng được dùng để host toàn pipeline ở mục 5.
 
 ```python
 import json
@@ -147,6 +147,11 @@ def start_vllm(action="serve"):
         raise
 
 
+```
+
+Để benchmark riêng Qwen qua API, chạy cell này để khởi động 3B FP16 trên GPU 0 và đợi API `127.0.0.1:8001` sẵn sàng. Nếu chỉ muốn host toàn pipeline, chuyển thẳng sang mục 5 sau khi khai báo hai hàm.
+
+```python
 vllm_process = start_vllm()
 ```
 
@@ -212,16 +217,21 @@ print(f"Segment features: {tuple(result['seg_features'].shape)}")
 
 **Chuẩn bị.** Thêm dataset gallery `mcot-vectors` chứa `gallery_dress_vectors.pt` và tạo hai Kaggle Secrets `API_KEY`, `JWT_SECRET`.
 
-**Bước 1. Khởi động lại vLLM cho toàn pipeline.** Trong kernel mặc định, dừng vLLM benchmark trên GPU 0 rồi khởi động lại theo cấu hình dùng chung với FastAPI.
+Để chạy thẳng full pipeline, chạy setup ở mục 1, rồi cell cài vLLM và cell khai báo `start_vllm()`/`stop_vllm()` ở mục 3. Sau đó chạy ba bước bên dưới theo thứ tự.
+
+**Bước 1. Khởi động vLLM cho toàn pipeline.** Chạy cell này trong kernel mặc định. Nếu đã chạy vLLM để benchmark ở mục 3, cell sẽ dừng tiến trình đó trước.
 
 ```python
-stop_vllm(vllm_process)
+if "vllm_process" in globals():
+    stop_vllm(vllm_process)
 vllm_process = start_vllm("serve-pipeline")
 ```
 
 Cấu hình pipeline đặt segmentation trên **GPU 0**, còn **GPU 1** chạy vLLM và `CIRModel`. vLLM dùng ngân sách **60% VRAM**, một sequence và eager mode để chừa bộ nhớ cho CIR. Nếu thiếu VRAM khi chạy chung, kiểm tra GPU còn tiến trình cũ bằng `nvidia-smi` và đọc hai log startup. Có thể chỉnh `MCOT_VLLM_GPU_MEMORY_UTILIZATION` trước khi khởi động vLLM. Latency của cấu hình chạy chung có thể khác bài đo vLLM riêng ở mục 3.
 
 **Bước 2. Khởi động FastAPI.** Chạy cell Python này trong kernel notebook mặc định. Uvicorn sẽ được khởi động bằng Python `py310`.
+
+Mặc định, FastAPI gọi Qwen qua vLLM trong lúc GPU 0 chạy Segment. CIR bắt đầu khi cả hai bước đã trả kết quả. `MCOT_PARALLEL_BRANCHES=1` bật chế độ song song. Dùng `0` để đo chế độ tuần tự với cùng server vLLM.
 
 ```python
 import os
@@ -251,6 +261,7 @@ env = {
     "MCOT_SEARCH_API_KEY": search_api_key,
     "MCOT_SEARCH_JWT_SECRET": secrets_client.get_secret("JWT_SECRET"),
     "MCOT_EXTRACTOR_MODE": "api",
+    "MCOT_PARALLEL_BRANCHES": "1",
     "MCOT_VLLM_BASE_URL": "http://127.0.0.1:8001/v1",
     "MCOT_GALLERY_PATH": "/kaggle/input/datasets/thichuy/mcot-vectors/gallery_dress_vectors.pt",
 }
@@ -285,7 +296,7 @@ print(f"FastAPI đã sẵn sàng tại {search_base}")
 
 `MCOT_CIR_CHECKPOINT` có thể trỏ đến checkpoint `dress.pt` riêng. Mặc định backend dùng checkpoint mà `setup.sh` đã liên kết tại `src/checkpoints/dress.pt`.
 
-**Bước 3. Lấy JWT, warmup rồi gọi tìm kiếm.** Cell chạy một request đầy đủ để warmup và đo ba request tiếp theo. Header `Server-Timing` ghi thời gian bước Qwen và tổng xử lý bên trong endpoint, tính bằng mili giây.
+**Bước 3. Lấy JWT, warmup rồi gọi tìm kiếm.** Cell chạy một request đầy đủ để warmup và đo ba request tiếp theo. Header `Server-Timing` ghi các mốc tính bằng mili giây. `segment` bao gồm I/O của nhánh Segment, `mcot` là thời gian bước Qwen qua API, `branches` là thời gian thực từ khi bắt đầu hai nhánh đến khi cả hai xong, còn `total` là tổng xử lý bên trong endpoint. Khi chạy song song, dùng `branches` để xem thời gian chờ thực tế của hai nhánh.
 
 ```python
 import sys
@@ -332,6 +343,8 @@ print(result.json())
 ```
 
 **So với local.** Dừng FastAPI bằng `search_process.terminate()` rồi `search_process.wait(timeout=30)`. Dừng vLLM bằng `stop_vllm(vllm_process)` để giải phóng GPU 1. Chạy lại bước 2 với `MCOT_EXTRACTOR_MODE = "local"`, rồi chạy bước 3 với cùng ảnh, prompt và gallery.
+
+**Đo A/B song song và tuần tự với vLLM.** Sau lượt đo mặc định, dừng FastAPI bằng `search_process.terminate()` và `search_process.wait(timeout=30)`. Giữ vLLM đang chạy, đổi `MCOT_PARALLEL_BRANCHES` thành `"0"` trong bước 2 rồi chạy lại bước 2 và 3 với cùng ảnh, prompt và gallery. So sánh latency trung vị của client, `branches` và `total` giữa hai lượt. Cả hai lượt giữ `MCOT_EXTRACTOR_MODE="api"`.
 
 **Gọi từ bên ngoài Kaggle.** Tạo Kaggle Secret `NGROK_AUTHTOKEN`, chạy cell sau rồi dùng `public_base` thay cho `search_base` ở client. Client vẫn lấy JWT và gọi `/api/list` theo bước 3. Cổng **8001** phục vụ kết nối nội bộ giữa FastAPI và vLLM.
 

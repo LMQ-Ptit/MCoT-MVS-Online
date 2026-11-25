@@ -6,7 +6,8 @@ import logging
 import os
 import sys
 import tempfile
-from contextlib import asynccontextmanager
+from concurrent.futures import ThreadPoolExecutor, wait
+from contextlib import asynccontextmanager, nullcontext
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Lock
@@ -70,6 +71,9 @@ async def lifespan(app):
         raise RuntimeError("Set MCOT_SEARCH_API_KEY and MCOT_SEARCH_JWT_SECRET before starting FastAPI.")
     if torch.cuda.device_count() < 2:
         raise RuntimeError("This backend uses two CUDA GPUs. Select GPU T4 x2 on Kaggle.")
+    parallel_flag = os.environ.get("MCOT_PARALLEL_BRANCHES", "1")
+    if parallel_flag not in ("0", "1"):
+        raise RuntimeError("MCOT_PARALLEL_BRANCHES must be 0 or 1.")
 
     gallery_path = Path(os.environ.get("MCOT_GALLERY_PATH", DEFAULT_GALLERY))
     checkpoint_path = Path(os.environ.get("MCOT_CIR_CHECKPOINT", REPO_DIR / "src/checkpoints/dress.pt"))
@@ -89,8 +93,16 @@ async def lifespan(app):
     app.state.gallery_ids = gallery["ids"]
     if len(app.state.gallery_ids) == 0 or len(app.state.gallery_features) != len(app.state.gallery_ids):
         raise RuntimeError("Gallery features and IDs must have the same nonzero length.")
-    print(f"READY: models + gallery loaded (MCoT mode={app.state.mcot.mode})", flush=True)
-    yield
+    use_parallel = app.state.mcot.mode == "api" and parallel_flag == "1"
+    executor_context = ThreadPoolExecutor(max_workers=1) if use_parallel else nullcontext()
+    with executor_context as executor:
+        app.state.mcot_executor = executor
+        branch_mode = "parallel" if use_parallel else "sequential"
+        print(
+            f"READY: models + gallery loaded (MCoT mode={app.state.mcot.mode}, branches={branch_mode})",
+            flush=True,
+        )
+        yield
 
 
 app = FastAPI(title="MCoT Search API", lifespan=lifespan)
@@ -120,6 +132,18 @@ def get_token(x_api_key: str = Header(None)):
     return {"access_token": token, "token_type": "bearer", "expires_in": TOKEN_TTL}
 
 
+def run_mcot(extractor, image, text):
+    started = perf_counter()
+    try:
+        result = extractor.extract(image, text)
+    except Exception as exc:
+        if extractor.mode != "api":
+            raise
+        logger.exception("MCoT inference endpoint failed")
+        raise HTTPException(502, "MCoT inference endpoint failed") from exc
+    return result, (perf_counter() - started) * 1000
+
+
 @app.post("/api/list", dependencies=[Depends(verify_token)])
 def list_results(
     response: Response,
@@ -134,31 +158,48 @@ def list_results(
     except (OSError, ValueError) as exc:
         raise HTTPException(400, "Invalid image file") from exc
 
-    with tempfile.TemporaryDirectory() as temp, gpu_lock, torch.inference_mode():
-        path = Path(temp) / "query.png"
-        pil.save(path)
-        with torch.cuda.device(0):
-            seg = app.state.seg.process_image(str(path), save_dir=temp, is_draw=False, compute_clip_features=True)
-        seg_features = seg["seg_features"].to("cuda:1")
+    lock_started = perf_counter()
+    with gpu_lock, torch.inference_mode():
+        lock_ms = (perf_counter() - lock_started) * 1000
+        branches_started = perf_counter()
+        executor = app.state.mcot_executor
+        future = None
+        if executor is not None:
+            # PIL encoders can update image metadata while saving.
+            future = executor.submit(run_mcot, app.state.mcot, pil.copy(), text)
+        try:
+            segment_started = perf_counter()
+            with tempfile.TemporaryDirectory() as temp, torch.cuda.device(0):
+                path = Path(temp) / "query.png"
+                pil.save(path)
+                seg = app.state.seg.process_image(
+                    str(path), save_dir=temp, is_draw=False, compute_clip_features=True
+                )
+            segment_ms = (perf_counter() - segment_started) * 1000
+            if future is None:
+                with torch.cuda.device(1):
+                    mcot, mcot_ms = run_mcot(app.state.mcot, pil, text)
+            else:
+                mcot, mcot_ms = future.result()
+        finally:
+            # Keep the lock until an already-running vLLM call has finished, even if Segment failed.
+            if future is not None and not future.done() and not future.cancel():
+                wait((future,))
+        branches_ms = (perf_counter() - branches_started) * 1000
 
+        cir_started = perf_counter()
         with torch.cuda.device(1):
-            mcot_start = perf_counter()
-            try:
-                mcot = app.state.mcot.extract(pil, text)
-            except Exception as exc:
-                if app.state.mcot.mode != "api":
-                    raise
-                logger.exception("MCoT inference endpoint failed")
-                raise HTTPException(502, "MCoT inference endpoint failed") from exc
-            mcot_ms = (perf_counter() - mcot_start) * 1000
+            seg_features = seg["seg_features"].to("cuda:1")
             query = app.state.cir.extract_query(
                 modified_text=[text],
                 reference_image=[pil],
                 reference_seg_feature_list=[seg_features],
                 llm_info_dict={field: [mcot[field]] for field in ("target", "retained", "deleted")},
             )
-        query = query.float().cpu()
+            query = query.float().cpu()
+        cir_ms = (perf_counter() - cir_started) * 1000
 
+    rank_started = perf_counter()
     ids = app.state.gallery_ids
     top_k = max(1, min(top_k, 50, len(ids)))
     scores, indices = torch.topk((query @ app.state.gallery_features.T).squeeze(0), top_k)
@@ -166,6 +207,12 @@ def list_results(
         {"rank": rank, "image_id": str(ids[int(index)]), "score": round(float(score), 4)}
         for rank, (score, index) in enumerate(zip(scores, indices), start=1)
     ]
-    total_ms = (perf_counter() - started) * 1000
-    response.headers["Server-Timing"] = f"mcot;dur={mcot_ms:.2f}, total;dur={total_ms:.2f}"
+    finished = perf_counter()
+    rank_ms = (finished - rank_started) * 1000
+    total_ms = (finished - started) * 1000
+    response.headers["Server-Timing"] = (
+        f"lock_wait;dur={lock_ms:.2f}, segment;dur={segment_ms:.2f}, mcot;dur={mcot_ms:.2f}, "
+        f"branches;dur={branches_ms:.2f}, cir;dur={cir_ms:.2f}, "
+        f"rank;dur={rank_ms:.2f}, total;dur={total_ms:.2f}"
+    )
     return {"query_text": text, "results": results}
